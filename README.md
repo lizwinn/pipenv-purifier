@@ -99,8 +99,6 @@ building anything.
 - `lockFile`: the lockfile, by default `src + "/pipenv-purifier.lock.json"`.
   It may lie outside `src`, as in a flake that packages a project without
   changing it.
-- `pipfileLock`: Pipfile.lock, by default `src + "/Pipfile.lock"`, for a
-  `src` that holds none.
 - `categories`: the package categories `environment` installs, as `pipenv
   sync --categories`. The default is `[ "default" ]`.
 - `testScript` and `testCategories`: the script `tests` runs, by default
@@ -110,7 +108,7 @@ building anything.
 - `pathSources`: the local packages that Pipfile.lock names by a path
   outside `src`, such as `"../shared"`, each mapped to a Nix path.
 
-`lib.pipenv-purifier.readLock { src, lockFile, pipfileLock }` reads the two
+`lib.pipenv-purifier.readLock { src, lockFile }` reads the two
 lockfiles into the lock in memory of the contract, `{ purifier, entries,
 outputs, problems }`, for a tool such as an SBOM generator.
 

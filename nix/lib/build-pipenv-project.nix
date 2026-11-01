@@ -46,8 +46,6 @@
   # The lockfile that `pipenv-purifier lock` wrote. It may lie outside
   # `src`, as in a flake that packages a project without changing it.
   lockFile ? src + "/pipenv-purifier.lock.json",
-  # Pipfile.lock, for a `src` that holds none.
-  pipfileLock ? src + "/Pipfile.lock",
   # The Python the project builds and runs with. The default is nixpkgs'
   # pythonXY for the `python_version` of the Pipfile's [requires], or
   # python3 when the Pipfile names none.
@@ -85,7 +83,7 @@ let
   # The lock in memory, which checkLock refuses with its problems.
   read = purifier.checkLock (
     import ./lock.nix {
-      inherit src lockFile pipfileLock;
+      inherit src lockFile;
     }
   );
   lock = read.views;

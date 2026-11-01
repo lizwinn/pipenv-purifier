@@ -31,7 +31,7 @@ The conformance checks of the purifier contract:
   edits the editable package, and runs `pipenv run simple` and `pipenv run
   test`, in a sandbox without network.
 - `conformance-external` builds the simple fixture from a `src` without
-  either lockfile, with `lockFile` and `pipfileLock` outside it, and runs
+  pipenv-purifier.lock.json, with `lockFile` outside it, and runs
   `prefetch --lockfile` with the lockfile outside the project.
 - `conformance-update` locks a copy of the simple fixture that allows any
   six while the local index serves six 1.16.0, adds six 1.17.0 to the

@@ -63,7 +63,6 @@ let
     inherit pkgs pathSources;
     src = source root;
     lockFile = /. + lockFile;
-    pipfileLock = root + "/Pipfile.lock";
   };
 in
 if

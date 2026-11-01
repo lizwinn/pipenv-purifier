@@ -47,23 +47,17 @@ let
     pathSources."../shared" = ./fixtures/outside/shared;
   };
 
-  # The simple fixture without either lockfile, as a flake that packages a
-  # project without changing it holds its source, and the lockfiles kept
-  # apart from it.
-  simpleWithoutLockfiles = builtins.path {
+  # The simple fixture without pipenv-purifier.lock.json, as a flake that
+  # packages a project without changing it holds its source, and the
+  # lockfile kept apart from it.
+  simpleWithoutLockfile = builtins.path {
     path = ./fixtures/simple;
-    name = "simple-without-lockfiles";
-    filter =
-      path: _:
-      !builtins.elem (baseNameOf path) [
-        "pipenv-purifier.lock.json"
-        "Pipfile.lock"
-      ];
+    name = "simple-without-lockfile";
+    filter = path: _: baseNameOf path != "pipenv-purifier.lock.json";
   };
   external = build {
-    src = simpleWithoutLockfiles;
+    src = simpleWithoutLockfile;
     lockFile = ./fixtures/simple/pipenv-purifier.lock.json;
-    pipfileLock = ./fixtures/simple/Pipfile.lock;
   };
 
   # A real-world project: Pipenv's own repository, which develops Pipenv

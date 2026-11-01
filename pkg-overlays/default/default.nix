@@ -1,34 +1,28 @@
 # SPDX-License-Identifier: MIT
 #
 # The default package overlay, which the flake exports as
-# `overlays.default`. It adds the packages of pkgs/ under
-# `pkgs.pipenv-purifier` (`.cli`), and the builder `buildPipenvProject`
-# (nix/lib/build-pipenv-project.nix) beside them, where nixpkgs keeps its own
-# builders. A package takes the builder by name, as
-# `{ buildPipenvProject }: (buildPipenvProject { src = ./.; }).packages.app`.
-# A consumer that lists this flake in `projects` holds the overlay as
+# `overlays.default`. It adds one attribute to the package set, the scope
+# `pkgs.pipenv-purifier`, which lib.makeScope makes. The scope holds the
+# command `cli` (pkgs/cli) and the builder `buildPipenvProject`
+# (nix/lib/build-pipenv-project.nix), each a package of the scope's
+# callPackage. A package takes the builder as
+# `{ pipenv-purifier }: (pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app`.
+# `pipenv-purifier.overrideScope` replaces what the scope shares, and
+# `pipenv-purifier.buildPipenvProject.override` replaces what the builder
+# takes. A consumer that lists this flake in `projects` holds the overlay as
 # `pipenv-purifier/default`, which its package sets apply by default.
 #
 # Both take the shared purifier library from this flake's closure: the
 # builder its functions, and the CLI its source, which the CLI's own Nix
 # builds import.
 { closure-lib, closure-inputs, ... }:
-let
-  packages = closure-lib.caisson.nixpkgs.mkPackagesOverlay ../../pkgs "pipenv-purifier";
-in
 {
-  overlay =
-    final: prev:
-    let
-      base = packages final prev;
-    in
-    base
-    // {
-      pipenv-purifier = base.pipenv-purifier // {
-        cli = base.pipenv-purifier.cli.override { purifierSource = closure-inputs.purifier; };
-      };
-      buildPipenvProject = final.callPackage ../../nix/lib/build-pipenv-project.nix {
+  overlay = final: prev: {
+    pipenv-purifier = final.lib.makeScope final.newScope (self: {
+      cli = self.callPackage ../../pkgs/cli { purifierSource = closure-inputs.purifier; };
+      buildPipenvProject = self.callPackage ../../nix/lib/build-pipenv-project.nix {
         inherit (closure-lib) purifier;
       };
-    };
+    });
+  };
 }

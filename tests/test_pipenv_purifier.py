@@ -230,10 +230,10 @@ class DamagedPipfileLock(unittest.TestCase):
             if text is not None:
                 with open(os.path.join(root, "Pipfile.lock"), "w") as f:
                     f.write(text)
-            return p.read_pipfile_lock(root)
+            return p.read_pipfile_lock(os.path.join(root, "Pipfile.lock"))
 
     def test_missing(self):
-        with self.assertRaisesRegex(p.Error, "run `pipenv lock` first"):
+        with self.assertRaisesRegex(p.Error, "does not exist; run `pipenv-purifier lock`"):
             self.read(None)
 
     def test_not_json(self):
@@ -259,19 +259,63 @@ class ContentHash(unittest.TestCase):
 
     def test_edited_lockfile_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
-            with open(os.path.join(root, "Pipfile.lock"), "w") as f:
+            tool_lock = os.path.join(root, "Pipfile.lock")
+            with open(tool_lock, "w") as f:
                 f.write("{}")
-            lock = {"version": p.FORMAT_VERSION, "inputsHash": p.inputs_hash(root, {})}
+            lock = {"version": p.FORMAT_VERSION, "inputsHash": p.inputs_hash(root, {}, tool_lock)}
             lock["contentHash"] = p.content_hash(lock)
             path = os.path.join(root, p.LOCK_FILE)
             with open(path, "w") as f:
                 json.dump(lock, f)
-            p.check_purifier_lock(root, {}, path)
+            p.check_purifier_lock(root, {}, path, tool_lock)
             lock["inputsHash"] = "0" * 64
             with open(path, "w") as f:
                 json.dump(lock, f)
             with self.assertRaisesRegex(p.Error, "edited after `pipenv-purifier lock`"):
-                p.check_purifier_lock(root, {}, path)
+                p.check_purifier_lock(root, {}, path, tool_lock)
+
+
+class ToolLockfileOutsideTheTree(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.outside = os.path.join(tempfile.mkdtemp(), "ext", "Pipfile.lock")
+        self.tree = os.path.join(self.root, "Pipfile.lock")
+        with open(self.tree, "w") as f:
+            f.write("tree")
+
+    def read(self, path):
+        with open(path) as f:
+            return f.read()
+
+    def test_first_run_starts_from_the_tree_and_writes_outside(self):
+        with p.in_tree(self.root, self.outside, write_back=True):
+            self.assertEqual(self.read(self.tree), "tree")
+            with open(self.tree, "w") as f:
+                f.write("resolved")
+        self.assertEqual(self.read(self.outside), "resolved")
+        self.assertEqual(self.read(self.tree), "tree")
+
+    def test_later_runs_start_from_the_outside_copy(self):
+        os.makedirs(os.path.dirname(self.outside))
+        with open(self.outside, "w") as f:
+            f.write("outside")
+        with p.in_tree(self.root, self.outside, write_back=False):
+            self.assertEqual(self.read(self.tree), "outside")
+        self.assertEqual(self.read(self.tree), "tree")
+        self.assertEqual(self.read(self.outside), "outside")
+
+    def test_tree_is_restored_after_an_error(self):
+        with self.assertRaises(p.Error):
+            with p.in_tree(self.root, self.outside, write_back=True):
+                raise p.Error("pipenv lock failed")
+        self.assertEqual(self.read(self.tree), "tree")
+        self.assertFalse(os.path.exists(self.outside))
+
+    def test_inputs_hash_reads_the_outside_copy(self):
+        os.makedirs(os.path.dirname(self.outside))
+        with open(self.outside, "w") as f:
+            f.write("outside")
+        self.assertNotEqual(p.inputs_hash(self.root, {}, self.outside), p.inputs_hash(self.root, {}, self.tree))
 
 
 class Pins(unittest.TestCase):
@@ -303,10 +347,11 @@ class InputsHash(unittest.TestCase):
                 "default": {"app": {"path": "."}, "a": {"path": "./libs/a"}, "out": {"path": "../outside"}},
             }
             self.assertEqual(p.tree_files(root, lock), ["libs/a/pyproject.toml", "pyproject.toml"])
-            before = p.inputs_hash(root, lock)
+            tool_lock = os.path.join(root, "Pipfile.lock")
+            before = p.inputs_hash(root, lock, tool_lock)
             with open(os.path.join(root, "libs/a/pyproject.toml"), "a") as f:
                 f.write("# changed\n")
-            self.assertNotEqual(before, p.inputs_hash(root, lock))
+            self.assertNotEqual(before, p.inputs_hash(root, lock, tool_lock))
 
 
 if __name__ == "__main__":

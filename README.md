@@ -34,8 +34,8 @@ project's `.venv` from those files, offline. After that, the usual Pipenv
 commands work.
 
 To build the project with Nix, a flake applies this flake's
-`overlays.default`, which adds the builder `buildPipenvProject` to the
-package set:
+`overlays.default`, which adds the scope `pipenv-purifier` to the package
+set. The scope holds the builder `buildPipenvProject` and the command:
 
 ```nix
 {
@@ -49,7 +49,7 @@ package set:
         inherit system;
         overlays = [ pipenv-purifier.overlays.default ];
       };
-      project = pkgs.buildPipenvProject { src = ./.; };
+      project = pkgs.pipenv-purifier.buildPipenvProject { src = ./.; };
     in
     {
       # The sdist and wheel of the local package `app`.
@@ -67,18 +67,18 @@ package set:
 }
 ```
 
-A package in an overlay takes the builder by name, like any builder of
-nixpkgs:
+A package in an overlay takes the scope by name:
 
 ```nix
 # package.nix
-{ buildPipenvProject }:
-(buildPipenvProject { src = ./.; }).packages.app
+{ pipenv-purifier }:
+(pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app
 ```
 
 `buildPipenvProject` is a package for `callPackage`. It takes the packages
-it needs by name, such as `stdenvNoCC`, `pipenv` and `fetchurl`, and
-`buildPipenvProject.override` replaces any of them.
+it needs by name, such as `stdenvNoCC`, `pipenv` and `fetchurl`.
+`pipenv-purifier.buildPipenvProject.override` replaces any of them, and
+`pipenv-purifier.overrideScope` replaces what the scope shares.
 
 `buildPipenvProject` gives:
 
@@ -275,7 +275,7 @@ builds it from that lockfile:
         inherit system;
         overlays = [ pipenv-purifier.overlays.default ];
       };
-      project = pkgs.buildPipenvProject {
+      project = pkgs.pipenv-purifier.buildPipenvProject {
         src = pipenv-src;
         lockFile = ./pipenv-purifier.lock.json;
         categories = [ "default" "develop" ];

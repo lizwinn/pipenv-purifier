@@ -4,7 +4,8 @@
 # access is the fixed-output fetches of locked files.
 {
   pkgs,
-  # The flake's default package overlay, which adds buildPipenvProject.
+  # The flake's default package overlay, which adds the scope
+  # `pipenv-purifier` with buildPipenvProject.
   overlay,
   cli,
   # The shared purifier library, `lib.purifier` of its flake.
@@ -15,7 +16,7 @@ let
 
   # Every fixture builds the way a consumer's package does: through
   # buildPipenvProject of a package set that the overlay applies to.
-  build = (pkgs.extend overlay).buildPipenvProject;
+  build = (pkgs.extend overlay).pipenv-purifier.buildPipenvProject;
 
   # A hatchling project, installed from its own directory, that depends on
   # attrs, which installs from its wheel, and on docopt, which has only an
@@ -59,6 +60,23 @@ let
   external = build {
     src = simpleWithoutLockfile;
     lockFile = ./fixtures/simple/pipenv-purifier.lock.json;
+  };
+  # The simple fixture without either lockfile, built with the copy of
+  # Pipfile.lock that the packaging flake keeps.
+  simpleWithoutLockfiles = builtins.path {
+    path = ./fixtures/simple;
+    name = "simple-without-lockfiles";
+    filter =
+      path: _:
+      !builtins.elem (baseNameOf path) [
+        "pipenv-purifier.lock.json"
+        "Pipfile.lock"
+      ];
+  };
+  externalToolLock = build {
+    src = simpleWithoutLockfiles;
+    lockFile = ./fixtures/simple/pipenv-purifier.lock.json;
+    pipfileLock = ./fixtures/simple/Pipfile.lock;
   };
 
   # A real-world project: Pipenv's own repository, which develops Pipenv
@@ -335,7 +353,7 @@ in
           exit 1
         fi
         cat "$TMPDIR/error"
-        grep -q 'run `pipenv lock`, then `pipenv-purifier lock`' "$TMPDIR/error"
+        grep -q 'run `pipenv-purifier lock`, which writes Pipfile.lock with `pipenv lock` first' "$TMPDIR/error"
         test ! -e .venv/bin/simple
         touch $out
       '';
@@ -476,6 +494,13 @@ in
         # --lockfile writes the lockfile outside the project.
         pipenv-purifier lock --lockfile "$TMPDIR/outside.json"
         cmp "$TMPDIR/first.json" "$TMPDIR/outside.json"
+        # With --tool-lockfile, the first lock run copies Pipfile.lock from
+        # the project to the outside path and leaves the copy in the project
+        # as it is. The lockfile is the same, because Pipfile.lock is.
+        pipenv-purifier lock --lockfile "$TMPDIR/external/lock.json" --tool-lockfile "$TMPDIR/external/Pipfile.lock"
+        cmp "$TMPDIR/Pipfile.lock" "$TMPDIR/external/Pipfile.lock"
+        cmp "$TMPDIR/Pipfile.lock" Pipfile.lock
+        cmp "$TMPDIR/first.json" "$TMPDIR/external/lock.json"
         touch $out
       '';
 
@@ -568,13 +593,30 @@ in
     runCommand "pipenv-purifier-test-conformance-external" { nativeBuildInputs = [ cli ]; }
       ''
         test "$(${external.environment}/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        test "$(${externalToolLock.environment}/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        export HOME=$TMPDIR
         cp -r ${./fixtures/simple} project
         chmod -R u+w project
         mv project/pipenv-purifier.lock.json lock.json
+        (
+          cd project
+          pipenv-purifier prefetch --lockfile ../lock.json --inputs ${external.prefetch}
+          test "$(.venv/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        )
+        # The project holds a Pipfile.lock that is no lockfile at all, and
+        # the commands read the copy kept outside, through the environment
+        # variables a dev shell of the packaging flake sets.
+        rm -rf project
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        mv project/pipenv-purifier.lock.json lock.json
+        mv project/Pipfile.lock Pipfile.lock
+        echo '{}' > project/Pipfile.lock
         cd project
-        export HOME=$TMPDIR
-        pipenv-purifier prefetch --lockfile ../lock.json --inputs ${external.prefetch}
+        PIPENV_PURIFIER_LOCKFILE=../lock.json PIPENV_PURIFIER_TOOL_LOCKFILE=../Pipfile.lock \
+          pipenv-purifier prefetch --inputs ${externalToolLock.prefetch}
         test "$(.venv/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        test "$(cat Pipfile.lock)" = '{}'
         touch $out
       '';
 

@@ -12,6 +12,7 @@
   purifier,
   src,
   lockFile,
+  pipfileLock,
   attribute,
 }:
 let
@@ -35,13 +36,13 @@ let
     };
 
   root = /. + src;
-  pipfileLock = builtins.fromJSON (builtins.readFile (root + "/Pipfile.lock"));
+  pipfileLockData = builtins.fromJSON (builtins.readFile (/. + pipfileLock));
   localPaths = lib.concatMap (
     category:
     lib.concatMap (entry: lib.optional (entry ? path) entry.path) (
-      lib.attrValues pipfileLock.${category}
+      lib.attrValues pipfileLockData.${category}
     )
-  ) (builtins.filter (k: k != "_meta") (lib.attrNames pipfileLock));
+  ) (builtins.filter (k: k != "_meta") (lib.attrNames pipfileLockData));
   outside = builtins.filter (
     path: path == ".." || lib.hasPrefix "../" path || lib.hasPrefix "/" path
   ) localPaths;
@@ -62,6 +63,7 @@ let
     inherit pathSources;
     src = source root;
     lockFile = /. + lockFile;
+    pipfileLock = /. + pipfileLock;
   };
 in
 if

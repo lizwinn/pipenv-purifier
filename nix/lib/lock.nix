@@ -12,10 +12,11 @@
   # The project root, which holds the Pipfile.
   src,
   lockFile ? src + "/pipenv-purifier.lock.json",
+  # Pipfile.lock, which Pipenv writes in the project. An external build may
+  # keep its own copy, which is read in place of the one in `src`.
+  pipfileLock ? src + "/Pipfile.lock",
 }:
 let
-  # Pipfile.lock, which Pipenv writes in the project.
-  pipfileLock = src + "/Pipfile.lock";
   inherit (builtins)
     attrNames
     attrValues

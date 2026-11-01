@@ -3,7 +3,7 @@
 # The `pipenv-purifier` command. It runs with the Pipenv of this package set,
 # which is also the Pipenv that buildPipenvProject runs, so the build
 # requirements that `pipenv-purifier lock` resolves are resolved by the Pipenv
-# that installs from them. `sync` and `publish` build with the Nix library
+# that installs from them. `prefetch` and `publish` build with the Nix library
 # and the nixpkgs of this package set, and `publish` uploads with uv.
 {
   lib,

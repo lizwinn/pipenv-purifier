@@ -12,6 +12,7 @@ beside Pipfile.lock.
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import html.parser
 import http.client
@@ -608,21 +609,22 @@ def tree_files(root, pipfile_lock):
     return sorted(files)
 
 
-def inputs_hash(root, pipfile_lock):
+def inputs_hash(root, pipfile_lock, tool_lock):
     """The hash the Nix library compares to tell whether the lockfile still
-    matches Pipfile.lock and the pyproject.toml files of the local source
-    trees in the project. nix/lib/lock.nix computes the same text."""
-    files = ["Pipfile.lock"] + tree_files(root, pipfile_lock)
-    text = "".join(f"{f} {sha256_file(os.path.join(root, f))}\n" for f in files)
+    matches Pipfile.lock, the one at `tool_lock`, and the pyproject.toml
+    files of the local source trees in the project. nix/lib/lock.nix
+    computes the same text."""
+    text = f"Pipfile.lock {sha256_file(tool_lock)}\n" + "".join(
+        f"{f} {sha256_file(os.path.join(root, f))}\n" for f in tree_files(root, pipfile_lock)
+    )
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def read_pipfile_lock(root):
-    """The project's Pipfile.lock, with an error that says what to run when
+def read_pipfile_lock(path):
+    """The Pipfile.lock at `path`, with an error that says what to run when
     it is missing or damaged."""
-    path = os.path.join(root, "Pipfile.lock")
     if not os.path.exists(path):
-        raise Error(f"{root} has no Pipfile.lock; run `pipenv lock` first")
+        raise Error(f"{path} does not exist; run `pipenv-purifier lock`, which writes it with `pipenv lock`")
     try:
         with open(path) as f:
             pipfile_lock = json.load(f)
@@ -644,20 +646,59 @@ def content_hash(lockfile):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def ensure_pipfile_lock(root, python):
-    """Pipfile.lock as Pipenv resolved it. A Pipfile.lock that matches the
-    Pipfile stays as it is. When it is missing or no longer matches the
-    Pipfile, as after adding a package to the Pipfile by hand, `pipenv lock`
-    writes it."""
-    path = os.path.join(root, "Pipfile.lock")
-    # Pipenv's own check: the hash in _meta is the hash of the Pipfile's
-    # content, which `pipenv verify` compares.
-    if not os.path.exists(path) or run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python)).returncode != 0:
-        log("Pipfile.lock is missing or does not match the Pipfile; writing it with `pipenv lock`")
-        result = subprocess.run(["pipenv", "lock"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
-        if result.returncode != 0:
-            raise Error("`pipenv lock` failed; its error above says why")
-    return read_pipfile_lock(root)
+@contextlib.contextmanager
+def in_tree(root, tool_lock, write_back):
+    """Runs Pipenv on the Pipfile.lock at `tool_lock`. Pipenv reads
+    Pipfile.lock beside the Pipfile, where it also resolves the local paths
+    of the Pipfile, so a Pipfile.lock outside the project is copied into the
+    project for the block: the outside copy, or the copy in the project when
+    there is no outside copy yet. With `write_back`, the Pipfile.lock that
+    Pipenv leaves is copied out to `tool_lock` afterwards. The copy in the
+    project is then restored as it was."""
+    tree = os.path.join(root, "Pipfile.lock")
+    if os.path.abspath(tool_lock) == os.path.abspath(tree):
+        yield
+        return
+    saved = None
+    if os.path.exists(tree):
+        with open(tree, "rb") as f:
+            saved = f.read()
+    try:
+        if os.path.exists(tool_lock):
+            shutil.copyfile(tool_lock, tree)
+        yield
+        if write_back and os.path.exists(tree):
+            os.makedirs(os.path.dirname(os.path.abspath(tool_lock)), exist_ok=True)
+            shutil.copyfile(tree, tool_lock)
+    finally:
+        if saved is None:
+            if os.path.exists(tree):
+                os.remove(tree)
+        else:
+            with open(tree, "wb") as f:
+                f.write(saved)
+
+
+def pipfile_matches(root, python):
+    """Whether the Pipfile.lock in the project matches the Pipfile. `pipenv
+    verify` compares the hash in _meta with the hash of the Pipfile."""
+    if not os.path.exists(os.path.join(root, "Pipfile.lock")):
+        return False
+    return run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python)).returncode == 0
+
+
+def ensure_pipfile_lock(root, python, tool_lock):
+    """Pipfile.lock as Pipenv resolved it, at `tool_lock`. A Pipfile.lock
+    that matches the Pipfile stays as it is. When it is missing or no longer
+    matches the Pipfile, as after adding a package to the Pipfile by hand,
+    `pipenv lock` writes it."""
+    with in_tree(root, tool_lock, write_back=True):
+        if not pipfile_matches(root, python):
+            log("Pipfile.lock is missing or does not match the Pipfile; writing it with `pipenv lock`")
+            result = subprocess.run(["pipenv", "lock"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
+            if result.returncode != 0:
+                raise Error("`pipenv lock` failed; its error above says why")
+    return read_pipfile_lock(tool_lock)
 
 
 def pipfile_lock_pins(pipfile_lock):
@@ -673,7 +714,7 @@ def pipfile_lock_pins(pipfile_lock):
     return keys, {name: v.pop() for name, v in versions.items() if len(v) == 1}
 
 
-def lock(root, python, lock_path):
+def lock(root, python, lock_path, tool_lock):
     """Writes the lockfile, which records only what Pipfile.lock cannot:
     - `urls`: the URL of each file of an index, by the sha256 that
       Pipfile.lock, or `buildPackages`, lists for it. The file's name is the
@@ -690,7 +731,7 @@ def lock(root, python, lock_path):
       its scripts, which Nix knows without building.
     - `inputsHash` and `contentHash`, which tell a stale lockfile and an
       edited one."""
-    pipfile_lock = ensure_pipfile_lock(root, python)
+    pipfile_lock = ensure_pipfile_lock(root, python, tool_lock)
     locked_keys, pinned = pipfile_lock_pins(pipfile_lock)
 
     urls = {}
@@ -861,14 +902,15 @@ def lock(root, python, lock_path):
                     request_sdist(ctx, key, files)
             entry["packages"] = records
 
-        for name in local_packages(root):
-            path = local_package_paths(root)[name]
+        local = local_package_paths(root, pipfile_lock)
+        for name in sorted(local):
+            path = local[name]
             log(f"building {name} to record its outputs")
             outputs[name] = build_outputs(ctx, name, os.path.normpath(os.path.join(root, path)))
 
     result = {
         "version": FORMAT_VERSION,
-        "inputsHash": inputs_hash(root, pipfile_lock),
+        "inputsHash": inputs_hash(root, pipfile_lock, tool_lock),
         "urls": dict(sorted(urls.items())),
         "buildPackages": dict(sorted(build_packages.items())),
         "buildRequirements": requirement_sets,
@@ -877,6 +919,7 @@ def lock(root, python, lock_path):
         "outputs": dict(sorted(outputs.items())),
     }
     result["contentHash"] = content_hash(result)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with open(lock_path, "w") as f:
         json.dump(result, f, indent=2)
         f.write("\n")
@@ -886,26 +929,27 @@ def lock(root, python, lock_path):
     )
 
 
-def update(root, python, lock_path, names):
+def update(root, python, lock_path, tool_lock, names):
     """Updates both lockfiles: Pipenv re-resolves every package with `pipenv
     lock`, or the packages `names` with `pipenv upgrade`, which writes
     Pipfile.lock and installs nothing, and the lock run then writes the
     pipenv-purifier lockfile for the new Pipfile.lock."""
     args = ["pipenv", "upgrade", *names] if names else ["pipenv", "lock"]
     log(f"re-resolving with `{' '.join(args)}`")
-    result = subprocess.run(args, cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
-    if result.returncode != 0:
-        raise Error(f"`{' '.join(args)}` failed; its error above says why")
-    lock(root, python, lock_path)
+    with in_tree(root, tool_lock, write_back=True):
+        result = subprocess.run(args, cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
+        if result.returncode != 0:
+            raise Error(f"`{' '.join(args)}` failed; its error above says why")
+    lock(root, python, lock_path, tool_lock)
 
 
 # Nix builds, prefetch and publish
 
-# Where `prefetch` keeps its garbage-collector root, in the project.
+# Where `prefetch` keeps its garbage-collector root, beside the lockfile.
 ROOT_DIR = ".pipenv-purifier"
 
 
-def nix_build(root, attribute, lock_path, out_link=None):
+def nix_build(root, attribute, lock_path, tool_lock, out_link=None):
     """Builds, with the Nix library this program was installed with, an
     attribute of nix/lib/cli.nix for the project, and returns the store
     path. With `out_link`, the result is also a garbage-collector root at
@@ -927,6 +971,7 @@ def nix_build(root, attribute, lock_path, out_link=None):
         "--argstr", "src", root,
         "--argstr", "attribute", attribute,
         "--argstr", "lockFile", lock_path,
+        "--argstr", "pipfileLock", os.path.abspath(tool_lock),
     ]
     result = subprocess.run(args, text=True, stdout=subprocess.PIPE, check=False)
     if result.returncode != 0:
@@ -953,13 +998,13 @@ def offline_env(inputs):
     )
 
 
-def check_purifier_lock(root, pipfile_lock, path):
+def check_purifier_lock(root, pipfile_lock, path, tool_lock):
     """The pipenv-purifier lockfile at `path` exists, is unedited, and was
-    made for this Pipfile.lock, as the Nix library checks too. The commands
-    check it before they build, so that the error names the file and the
-    command to run."""
+    made for the Pipfile.lock at `tool_lock`, as the Nix library checks too.
+    The commands check it before they build, so that the error names the
+    file and the command to run."""
     if not os.path.exists(path):
-        raise Error(f"{root} has no {LOCK_FILE}; run `pipenv-purifier lock` first")
+        raise Error(f"{path} does not exist; run `pipenv-purifier lock` first")
     try:
         with open(path) as f:
             purifier_lock = json.load(f)
@@ -969,37 +1014,38 @@ def check_purifier_lock(root, pipfile_lock, path):
         raise Error(f"{path} is not a lockfile of this pipenv-purifier; run `pipenv-purifier lock` to write it again")
     if purifier_lock.get("contentHash") != content_hash(purifier_lock):
         raise Error(f"{path} was edited after `pipenv-purifier lock` wrote it; run `pipenv-purifier lock` to write it again")
-    if purifier_lock.get("inputsHash") != inputs_hash(root, pipfile_lock):
+    if purifier_lock.get("inputsHash") != inputs_hash(root, pipfile_lock, tool_lock):
         raise Error(
             f"{LOCK_FILE} no longer matches Pipfile.lock or the pyproject.toml of a local package, "
             "as after `pipenv install`; run `pipenv-purifier lock`"
         )
 
 
-def prefetch(root, lock_path, inputs=None, categories_arg=None):
+def prefetch(root, lock_path, tool_lock, inputs=None, categories_arg=None):
     """Realizes in the Nix store everything the development loop needs: the
     Python of the build, and the locked files of every category for this
     system, development and test packages included. A garbage-collector root
-    in the project's .pipenv-purifier/ keeps them. Then it installs the
+    in .pipenv-purifier/ beside the lockfile keeps them. Then it installs the
     project's .venv from them, offline: the packages of an index with their
     hashes, the packages from git and URLs from their wheels and files, and
     the local packages as Pipfile.lock says, editable or not. Pipenv finds
     the .venv afterwards, so `pipenv run` and `pipenv shell` work with no
     network, and so does an editor that uses the .venv's Python."""
-    pipfile_lock = read_pipfile_lock(root)
-    result = run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=sys.executable))
-    if result.returncode != 0:
+    pipfile_lock = read_pipfile_lock(tool_lock)
+    with in_tree(root, tool_lock, write_back=False):
+        matches = pipfile_matches(root, sys.executable)
+    if not matches:
         raise Error(
             "Pipfile.lock does not match the Pipfile, as after adding a package to the Pipfile by hand; "
-            "run `pipenv lock`, then `pipenv-purifier lock`"
+            "run `pipenv-purifier lock`, which writes Pipfile.lock with `pipenv lock` first"
         )
-    check_purifier_lock(root, pipfile_lock, lock_path)
+    check_purifier_lock(root, pipfile_lock, lock_path, tool_lock)
     source = inputs
     if inputs is None:
         log("fetching the locked files with Nix")
-        os.makedirs(os.path.join(root, ROOT_DIR), exist_ok=True)
-        source = os.path.join(ROOT_DIR, "inputs")
-        inputs = nix_build(root, "prefetch", lock_path, out_link=os.path.join(root, source))
+        source = os.path.join(os.path.dirname(lock_path), ROOT_DIR, "inputs")
+        os.makedirs(os.path.dirname(source), exist_ok=True)
+        inputs = nix_build(root, "prefetch", lock_path, tool_lock, out_link=source)
     with open(os.path.join(inputs, "direct.json")) as f:
         direct = json.load(f)
     venv = os.path.join(root, ".venv")
@@ -1062,12 +1108,10 @@ def rewrite(pipfile_lock, direct, local_path, keep_editable):
     return out
 
 
-def local_package_paths(root):
+def local_package_paths(root, pipfile_lock):
     """The local packages inside the project, the source trees that
     Pipfile.lock names by a path in the project, by name. They are the
     project's outputs, and `publish` uploads them."""
-    with open(os.path.join(root, "Pipfile.lock")) as f:
-        pipfile_lock = json.load(f)
     paths = {}
     for category in categories(pipfile_lock):
         for name, entry in pipfile_lock[category].items():
@@ -1075,10 +1119,6 @@ def local_package_paths(root):
             if path is not None and inside_project(path) and os.path.isdir(os.path.join(root, path)):
                 paths[normalize(name)] = os.path.normpath(path)
     return paths
-
-
-def local_packages(root):
-    return sorted(local_package_paths(root))
 
 
 def distributions(directory):
@@ -1089,7 +1129,7 @@ def distributions(directory):
     ]
 
 
-def publish(root, lock_path, uv_publish_args, release=None):
+def publish(root, lock_path, tool_lock, uv_publish_args, release=None):
     """Uploads with `uv publish` the `release` of the project, the sdists
     and wheels of its local packages that Nix built: built now, or the one
     at `release` that Nix built before. Pipenv has no upload command of its
@@ -1097,9 +1137,9 @@ def publish(root, lock_path, uv_publish_args, release=None):
     which current build backends such as hatchling write, and uv uploads
     them."""
     if release is None:
-        check_purifier_lock(root, read_pipfile_lock(root), lock_path)
+        check_purifier_lock(root, read_pipfile_lock(tool_lock), lock_path, tool_lock)
         log("building the release with Nix")
-        release = nix_build(root, "release", lock_path)
+        release = nix_build(root, "release", lock_path, tool_lock)
     files = distributions(release)
     if not files:
         raise Error("there is nothing to upload")
@@ -1153,23 +1193,31 @@ def main(argv=None):
     for sub_parser in (lock_parser, update_parser, prefetch_parser, publish_parser):
         sub_parser.add_argument(
             "--lockfile",
-            help=f"the pipenv-purifier lockfile, which may lie outside the project (default: {LOCK_FILE} in the project)",
+            default=os.environ.get("PIPENV_PURIFIER_LOCKFILE"),
+            help=f"the pipenv-purifier lockfile of an external build (default: $PIPENV_PURIFIER_LOCKFILE, else {LOCK_FILE} in the project)",
+        )
+        sub_parser.add_argument(
+            "--tool-lockfile",
+            default=os.environ.get("PIPENV_PURIFIER_TOOL_LOCKFILE"),
+            help="the Pipfile.lock of an external build, which `lock` and `update` write instead of the one in the project "
+            "(default: $PIPENV_PURIFIER_TOOL_LOCKFILE, else Pipfile.lock in the project)",
         )
     args = parser.parse_args(argv)
     root = os.path.abspath(args.project)
     lock_path = os.path.abspath(args.lockfile) if args.lockfile else os.path.join(root, LOCK_FILE)
+    tool_lock = os.path.abspath(args.tool_lockfile) if args.tool_lockfile else os.path.join(root, "Pipfile.lock")
     try:
         if args.command == "lock":
-            lock(root, args.python, lock_path)
+            lock(root, args.python, lock_path, tool_lock)
         elif args.command == "update":
-            update(root, args.python, lock_path, args.packages)
+            update(root, args.python, lock_path, tool_lock, args.packages)
         elif args.command == "prefetch":
-            prefetch(root, lock_path, args.inputs, args.categories)
+            prefetch(root, lock_path, tool_lock, args.inputs, args.categories)
         elif args.command == "publish":
             extra = args.uv_publish_args
             if extra and extra[0] == "--":
                 extra = extra[1:]
-            publish(root, lock_path, extra, args.release)
+            publish(root, lock_path, tool_lock, extra, args.release)
     except Error as e:
         log(str(e))
         return 1

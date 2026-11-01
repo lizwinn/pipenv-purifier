@@ -32,9 +32,9 @@
 #   from.
 #
 # The builder is a package for callPackage, which the flake's default
-# package overlay adds to the package set as `buildPipenvProject`.
-# `buildPipenvProject.override` replaces any of the packages it takes by
-# name.
+# package overlay adds to the scope `pipenv-purifier` of the package set.
+# `pipenv-purifier.buildPipenvProject.override` replaces any of the packages
+# it takes by name.
 {
   lib,
   stdenvNoCC,
@@ -45,6 +45,8 @@
   glibc,
   fetchurl,
   fetchgit,
+  unzip,
+  zstd,
   # The Pythons of nixpkgs by attribute name, such as `python314`, and the
   # default Python.
   pythonInterpreters,
@@ -62,6 +64,9 @@
   # The lockfile that `pipenv-purifier lock` wrote. It may lie outside
   # `src`, as in a flake that packages a project without changing it.
   lockFile ? src + "/pipenv-purifier.lock.json",
+  # Pipfile.lock, by default the one in `src`. An external build may pass
+  # its own copy, which the build uses in place of the one in `src`.
+  pipfileLock ? src + "/Pipfile.lock",
   # The Python the project builds and runs with. The default is nixpkgs'
   # pythonXY for the `python_version` of the Pipfile's [requires], or
   # python3 when the Pipfile names none.
@@ -91,7 +96,7 @@ let
   # The lock in memory, which checkLock refuses with its problems.
   read = purifier.checkLock (
     import ./lock.nix {
-      inherit src lockFile;
+      inherit src lockFile pipfileLock;
     }
   );
   lock = read.views;
@@ -104,8 +109,22 @@ let
   );
   # A download entry of the lockfile to its store path.
   # Pipfile.lock records packages from an index, from git and from URLs,
-  # which the fetchers of files and git checkouts fetch.
-  fetch = purifier.fetchEntry ({ inherit fetchurl fetchgit; } // fetchers);
+  # which the fetchers of files and git checkouts fetch. The other packages
+  # are the ones fetchEntry builds with after a fetch.
+  fetch = purifier.fetchEntry (
+    {
+      inherit
+        fetchurl
+        fetchgit
+        runCommand
+        unzip
+        zstd
+        python3
+        writeText
+        ;
+    }
+    // fetchers
+  );
 
   pythonAttribute = "python${lib.replaceStrings [ "." ] [ "" ] lock.pythonVersion}";
   interpreter =

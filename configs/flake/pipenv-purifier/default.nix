@@ -16,12 +16,14 @@
       inherit (libOverlays) default;
     };
 
-    # The packages are the `default` entry of this flake's package overlay
-    # registry (pkg-overlays/): the package set applies it by default, and
-    # the flake exports it as `pkgOverlays` and as the plain
-    # `overlays.default`.
+    # The package overlay registry (pkg-overlays/) has the `default` entry,
+    # which the package set applies by default, and which the flake exports
+    # as `pkgOverlays` and as the plain `overlays.default`. The flake
+    # publishes the derivations of the scope `pkgs.pipenv-purifier` as its
+    # packages itself, because the scope also holds the builder, which is a
+    # function.
     nixpkgs = {
-      packages.export.enabled = true;
+      packages.export.enabled = false;
     };
   };
 
@@ -30,9 +32,16 @@
   # directory. `nix develop github:nix-purifiers/pipenv-purifier` gives the
   # Pipenv that the Nix builds run, with the CLI.
   perSystem =
-    { config, pkgs, ... }:
     {
-      packages.default = config.packages.cli;
+      config,
+      lib,
+      pkgs,
+      ...
+    }:
+    {
+      packages = lib.filterAttrs (_: lib.isDerivation) pkgs.pipenv-purifier // {
+        default = config.packages.cli;
+      };
       devShells.default = pkgs.mkShell {
         packages = [
           pkgs.pipenv

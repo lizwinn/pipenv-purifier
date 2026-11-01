@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-{ ... }:
+{ closure-lib, ... }:
 {
   config,
   inputs,
@@ -8,23 +8,21 @@
 }:
 {
 
-  imports = [ inputs.flake-parts.flakeModules.partitions ];
+  imports = [
+    inputs.flake-parts.flakeModules.partitions
+    closure-lib.caisson.modules.flake."purifier/purifier-packages"
+  ];
+
+  # The flake publishes the derivations of the scope `pkgs.pipenv-purifier`
+  # as its packages.
+  purifier.scope = "pipenv-purifier";
 
   debug = false;
-  caisson = {
-    libOverlays.exported = libOverlays: {
-      inherit (libOverlays) default;
-    };
-
-    # The package overlay registry (pkg-overlays/) has the `default` entry,
-    # which the package set applies by default, and which the flake exports
-    # as `pkgOverlays` and as the plain `overlays.default`. The flake
-    # publishes the derivations of the scope `pkgs.pipenv-purifier` as its
-    # packages itself, because the scope also holds the builder, which is a
-    # function.
-    nixpkgs = {
-      packages.export.enabled = false;
-    };
+  # The package overlay registry (pkg-overlays/) has the `default` entry,
+  # which the package set applies by default, and which the flake exports as
+  # `pkgOverlays` and as the plain `overlays.default`.
+  caisson.libOverlays.exported = libOverlays: {
+    inherit (libOverlays) default;
   };
 
   # `nix run github:nix-purifiers/pipenv-purifier -- lock` writes
@@ -32,16 +30,9 @@
   # directory. `nix develop github:nix-purifiers/pipenv-purifier` gives the
   # Pipenv that the Nix builds run, with the CLI.
   perSystem =
+    { config, pkgs, ... }:
     {
-      config,
-      lib,
-      pkgs,
-      ...
-    }:
-    {
-      packages = lib.filterAttrs (_: lib.isDerivation) pkgs.pipenv-purifier // {
-        default = config.packages.cli;
-      };
+      packages.default = config.packages.cli;
       devShells.default = pkgs.mkShell {
         packages = [
           pkgs.pipenv

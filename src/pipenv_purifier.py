@@ -789,13 +789,18 @@ def nix_build(root, attribute, package=None):
     attribute of nix/lib/cli.nix for the project. Returns the store path."""
     library = os.environ.get("PIPENV_PURIFIER_NIX_LIB")
     nixpkgs = os.environ.get("PIPENV_PURIFIER_NIXPKGS")
-    if not library or not nixpkgs:
-        raise Error("this command needs the pipenv-purifier package, which sets PIPENV_PURIFIER_NIX_LIB and PIPENV_PURIFIER_NIXPKGS")
+    purifier = os.environ.get("PIPENV_PURIFIER_LIBRARY")
+    if not library or not nixpkgs or not purifier:
+        raise Error(
+            "this command needs the pipenv-purifier package, which sets PIPENV_PURIFIER_NIX_LIB, "
+            "PIPENV_PURIFIER_NIXPKGS and PIPENV_PURIFIER_LIBRARY"
+        )
     args = [
         "nix-build",
         "--no-out-link",
         os.path.join(library, "cli.nix"),
         "--arg", "nixpkgs", nixpkgs,
+        "--argstr", "purifier", purifier,
         "--argstr", "src", root,
         "--argstr", "attribute", attribute,
     ]

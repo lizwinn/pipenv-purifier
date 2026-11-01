@@ -3,11 +3,15 @@
 # Unit tests of the Nix library that need no build: wheel selection, name
 # normalization, and the check that pipenv-purifier.lock.json still matches
 # Pipfile.lock.
-{ pkgs }:
+{
+  pkgs,
+  # The shared purifier library, for its wheel selection.
+  purifier,
+}:
 let
   inherit (pkgs) lib;
 
-  installs = import ../nix/lib/wheels.nix {
+  installs = purifier.wheels {
     pythonVersion = "3.14";
     arch = "x86_64";
     glibcVersion = "2.40";

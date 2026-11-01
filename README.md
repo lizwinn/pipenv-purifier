@@ -91,8 +91,10 @@ so Nix knows them without building anything.
   sync --categories`. The default is `[ "default" ]`.
 - `python`: the interpreter. The default is nixpkgs' `pythonXY` for the
   `python_version` in the Pipfile's `[requires]`, or `python3`.
-- `fetchurl`: a replacement for the fetcher of locked files, for
-  credentials or mirrors (`nix/lib/fetch.nix`).
+- `fetchurl`: a replacement for nixpkgs' `fetchurl` for the locked files,
+  for credentials or mirrors. It takes the arguments that the
+  [purifier](https://github.com/nix-purifiers/purifier) library's
+  `fetchEntry` passes to `fetchurl`.
 - `pathSources`: the local packages that Pipfile.lock names by a path
   outside `src`, such as `"../shared"`, each mapped to a Nix path.
 

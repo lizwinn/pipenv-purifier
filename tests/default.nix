@@ -7,6 +7,8 @@
   # The flake's default package overlay, which adds buildPipenvProject.
   overlay,
   cli,
+  # The shared purifier library, `lib.purifier` of its flake.
+  purifier,
 }:
 let
   inherit (pkgs) lib;
@@ -253,7 +255,7 @@ in
     touch $out
   '';
 
-  nix-library = import ./nix-library.nix { inherit pkgs; };
+  nix-library = import ./nix-library.nix { inherit pkgs purifier; };
 
   # The lock tool's unit tests, on the Python and packages the CLI runs on.
   unit =

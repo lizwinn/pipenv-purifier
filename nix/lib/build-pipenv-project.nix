@@ -27,9 +27,10 @@
   linkFarm,
   runCommand,
   writeText,
-  fetchgit,
   pipenv,
   glibc,
+  # The shared purifier library, `lib.purifier` of its flake.
+  purifier,
 }:
 {
   # The project root, which holds the Pipfile, Pipfile.lock and
@@ -43,7 +44,8 @@
   # --categories`.
   categories ? [ "default" ],
   lockFile ? src + "/pipenv-purifier.lock.json",
-  # A replacement for the fetcher of locked files; see nix/lib/fetch.nix.
+  # A replacement for nixpkgs' fetchurl, for the locked files, as the shared
+  # purifier library's fetchEntry takes it: for credentials or mirrors.
   fetchurl ? null,
   # The local packages that Pipfile.lock names by a path outside `src`, such
   # as "../shared", each mapped to a Nix path that holds it. A path inside
@@ -61,10 +63,10 @@ let
     ;
 
   lock = import ./lock.nix { inherit src lockFile; };
-  fetch = import ./fetch.nix {
-    nixpkgsFetchurl = pkgs.fetchurl;
-    inherit fetchurl;
-  };
+  # A download entry of the lockfile to its store path.
+  fetch = purifier.fetchEntry (
+    { inherit pkgs; } // lib.optionalAttrs (fetchurl != null) { inherit fetchurl; }
+  );
 
   pythonAttribute =
     if lock.pythonVersion == null then
@@ -80,7 +82,7 @@ let
 
   platform = stdenvNoCC.hostPlatform;
   target = "Python ${interpreter.pythonVersion} on ${platform.system}";
-  installs = import ./wheels.nix {
+  installs = purifier.wheels {
     inherit (interpreter) pythonVersion;
     arch = platform.parsed.cpu.name;
     glibcVersion = glibc.version;
@@ -167,10 +169,7 @@ let
         in
         {
           inherit name;
-          path = fetch {
-            name = lock.storeName name;
-            inherit (file) url mirrors hash;
-          };
+          path = fetch file;
         }
       ) fileNames
     );
@@ -182,16 +181,7 @@ let
   isGit = name: lock.gitEntries ? ${(lockedSource name).artifact};
 
   # The locked file of a package from a URL.
-  urlFile =
-    name:
-    let
-      source = lockedSource name;
-      file = lock.files.${source.artifact};
-    in
-    fetch {
-      name = lock.storeName (baseNameOf source.artifact);
-      inherit (file) url mirrors hash;
-    };
+  urlFile = name: fetch lock.files.${(lockedSource name).artifact};
 
   # A package from git, built into a wheel in a derivation of its own. A
   # backend that reads its version from git, through setuptools-scm or
@@ -202,12 +192,7 @@ let
     name: entry:
     let
       source = lockedSource name;
-      git = lock.gitEntries.${source.artifact};
-      checkout = fetchgit {
-        inherit (git.git) url rev leaveDotGit;
-        inherit (git) hash;
-        fetchSubmodules = git.git.submodules;
-      };
+      checkout = fetch lock.gitEntries.${source.artifact};
     in
     stdenvNoCC.mkDerivation {
       pname = "${name}-wheel";

@@ -11,6 +11,8 @@
 # read from that path.
 {
   nixpkgs,
+  # The source of the shared purifier library.
+  purifier,
   src,
   attribute,
   package ? null,
@@ -56,10 +58,13 @@ let
     if lib.pathIsDirectory target then source target else target
   );
 
-  project = pkgs.callPackage ./build-pipenv-project.nix { } {
-    src = source root;
-    inherit pathSources;
-  };
+  project =
+    pkgs.callPackage ./build-pipenv-project.nix
+      { purifier = import "${purifier}/nix/lib" { inherit lib; }; }
+      {
+        src = source root;
+        inherit pathSources;
+      };
 in
 if attribute == "interactive" then
   project.interactive

@@ -55,14 +55,15 @@ Pipfile.lock with `builtins.fromJSON` (`nix/lib/lock.nix`).
 
 ## Choosing the files for a system
 
-`nix/lib/wheels.nix` decides from a wheel's file name whether it installs
-with the build's Python on the build's system (PEP 425 tags, manylinux 1,
-2010, 2014 and `2_N` against the glibc of the package set, `abi3`). For each
-package, `nix/lib/build-pipenv-project.nix` takes its wheels that install,
-or else its sdist and the build of it. A build adds the files of its set of
-build requirements, chosen the same way, and the builds those need in turn.
-Every chosen file is a fixed-output derivation, and the files are linked
-into one flat directory, the wheelhouse.
+The shared [purifier](https://github.com/nix-purifiers/purifier) library's
+`wheels` decides from a wheel's file name whether it installs with the
+build's Python on the build's system (PEP 425 tags, manylinux 1, 2010, 2014
+and `2_N` against the glibc of the package set, `abi3`). For each package,
+`nix/lib/build-pipenv-project.nix` takes its wheels that install, or else
+its sdist and the build of it. A build adds the files of its set of build
+requirements, chosen the same way, and the builds those need in turn. The
+library's `fetchEntry` fetches every chosen file and every git checkout, and
+the files are linked into one flat directory, the wheelhouse.
 
 ## Installing in the sandbox
 

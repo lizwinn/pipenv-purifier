@@ -15,6 +15,8 @@
   git,
   nix-prefetch-git,
   path,
+  # The source of the shared purifier library.
+  purifierSource,
 }:
 let
   # The lock run reads requirements with `packaging` and builds the local
@@ -55,7 +57,8 @@ stdenvNoCC.mkDerivation {
       } \
       --set-default PIPENV_PURIFIER_PYTHON ${python3.interpreter} \
       --set PIPENV_PURIFIER_NIX_LIB $out/share/pipenv-purifier/nix-lib \
-      --set PIPENV_PURIFIER_NIXPKGS ${path}
+      --set PIPENV_PURIFIER_NIXPKGS ${path} \
+      --set PIPENV_PURIFIER_LIBRARY ${purifierSource}
     runHook postInstall
   '';
 

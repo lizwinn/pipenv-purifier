@@ -4,17 +4,18 @@
 # access is the fixed-output fetches of locked files.
 {
   pkgs,
+  # The flake's default package overlay, which adds buildPipenvProject.
+  overlay,
   cli,
-  # The builder of the purifier contract, `lib.pipenv-purifier` of this
-  # flake.
-  buildPipenvProject,
   # The shared purifier library, `lib.purifier` of its flake.
   purifier,
 }:
 let
   inherit (pkgs) lib runCommand;
 
-  build = args: buildPipenvProject ({ inherit pkgs; } // args);
+  # Every fixture builds the way a consumer's package does: through
+  # buildPipenvProject of a package set that the overlay applies to.
+  build = (pkgs.extend overlay).buildPipenvProject;
 
   # A hatchling project, installed from its own directory, that depends on
   # attrs, which installs from its wheel, and on docopt, which has only an
@@ -300,7 +301,7 @@ in
     edited = "attrs: 25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0";
   };
 
-  # After `prefetch`, the everyday loop works with no network: `pipenv run`
+  # After `prefetch`, the development loop works with no network: `pipenv run`
   # of the project's script and of its tests, in the .venv that `prefetch`
   # installed, after an edit to the editable local package.
   conformance-offline = prefetches "conformance-offline" {

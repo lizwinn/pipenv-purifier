@@ -55,12 +55,11 @@ let
     if lib.pathIsDirectory target then source target else target
   );
 
-  buildPipenvProject = import ./build-pipenv-project.nix {
-    inherit lib;
+  buildPipenvProject = pkgs.callPackage ./build-pipenv-project.nix {
     purifier = import "${purifier}/nix/lib" { inherit lib; };
   };
   project = buildPipenvProject {
-    inherit pkgs pathSources;
+    inherit pathSources;
     src = source root;
     lockFile = /. + lockFile;
   };

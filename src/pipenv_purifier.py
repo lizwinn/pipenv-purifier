@@ -977,7 +977,7 @@ def check_purifier_lock(root, pipfile_lock, path):
 
 
 def prefetch(root, lock_path, inputs=None, categories_arg=None):
-    """Realizes in the Nix store everything the everyday loop needs: the
+    """Realizes in the Nix store everything the development loop needs: the
     Python of the build, and the locked files of every category for this
     system, development and test packages included. A garbage-collector root
     in the project's .pipenv-purifier/ keeps them. Then it installs the
@@ -1131,7 +1131,7 @@ def main(argv=None):
     update_parser.add_argument("packages", nargs="*", help="the packages to update (every package when absent)")
     prefetch_parser = sub.add_parser(
         "prefetch",
-        help="fetch everything the everyday loop needs into the Nix store and install the project's .venv from it, offline",
+        help="fetch everything the development loop needs into the Nix store and install the project's .venv from it, offline",
     )
     prefetch_parser.add_argument("--project", default=".", help="the directory that holds the Pipfile")
     prefetch_parser.add_argument(

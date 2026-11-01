@@ -30,13 +30,29 @@
 #   `environment`, as a package that `nix run` runs.
 # - `prefetch`: what `pipenv-purifier prefetch` installs the project's .venv
 #   from.
+#
+# The builder is a package for callPackage, which the flake's default
+# package overlay adds to the package set as `buildPipenvProject`.
+# `buildPipenvProject.override` replaces any of the packages it takes by
+# name.
 {
   lib,
+  stdenvNoCC,
+  linkFarm,
+  runCommand,
+  writeText,
+  pipenv,
+  glibc,
+  fetchurl,
+  fetchgit,
+  # The Pythons of nixpkgs by attribute name, such as `python314`, and the
+  # default Python.
+  pythonInterpreters,
+  python3,
   # The shared purifier library, `lib.purifier` of its flake.
   purifier,
 }:
 {
-  pkgs,
   # The project root, which holds the Pipfile.
   src,
   # Replacements for the fetchers of nixpkgs, which the shared purifier
@@ -71,14 +87,6 @@ let
     listToAttrs
     map
     ;
-  inherit (pkgs)
-    stdenvNoCC
-    linkFarm
-    runCommand
-    writeText
-    pipenv
-    glibc
-    ;
 
   # The lock in memory, which checkLock refuses with its problems.
   read = purifier.checkLock (
@@ -95,18 +103,18 @@ let
     }) (purifier.entriesFor stdenvNoCC.hostPlatform.system read)
   );
   # A download entry of the lockfile to its store path.
-  fetch = purifier.fetchEntry ({ inherit pkgs; } // fetchers);
+  # Pipfile.lock records packages from an index, from git and from URLs,
+  # which the fetchers of files and git checkouts fetch.
+  fetch = purifier.fetchEntry ({ inherit fetchurl fetchgit; } // fetchers);
 
-  pythonAttribute =
-    if lock.pythonVersion == null then
-      "python3"
-    else
-      "python${lib.replaceStrings [ "." ] [ "" ] lock.pythonVersion}";
+  pythonAttribute = "python${lib.replaceStrings [ "." ] [ "" ] lock.pythonVersion}";
   interpreter =
     if python != null then
       python
+    else if lock.pythonVersion == null then
+      python3
     else
-      pkgs.${pythonAttribute}
+      pythonInterpreters.${pythonAttribute}
         or (throw "pipenv-purifier: the Pipfile asks for Python ${lock.pythonVersion}, and nixpkgs has no ${pythonAttribute}. Pass `python`.");
 
   platform = stdenvNoCC.hostPlatform;

@@ -2,7 +2,7 @@
 { callPackage, ... }:
 {
   # The `pipenv-purifier` command: `lock` writes pipenv-purifier.lock.json,
-  # `prefetch` fetches what the everyday loop needs and installs the
+  # `prefetch` fetches what the development loop needs and installs the
   # project's .venv offline, and `publish` uploads the release that Nix
   # built. The default package overlay gives it the source of the shared
   # purifier library.

@@ -84,11 +84,10 @@ let
   # pre-commit, gunicorn, and pyyaml 6.0.1, which has no wheel for Python
   # 3.14 and builds from its sdist with Cython. The lockfile beside this
   # file is what `pipenv-purifier lock` wrote for that commit.
-  realWorldPipenvSource = pkgs.fetchFromGitHub {
-    owner = "pypa";
-    repo = "pipenv";
-    rev = "fef029307389de23d0704407e4d0ebf1d1b17758";
-    hash = "sha256-3su6oPoEuY/sL3tQjMu44KRYkDhruJAMxTpzzdtYHJQ=";
+  # Lock validation reads Pipfile at evaluation time on either system.
+  realWorldPipenvSource = builtins.fetchTarball {
+    url = "https://github.com/pypa/pipenv/archive/fef029307389de23d0704407e4d0ebf1d1b17758.tar.gz";
+    sha256 = "sha256-3su6oPoEuY/sL3tQjMu44KRYkDhruJAMxTpzzdtYHJQ=";
   };
   realWorldPipenv = build {
     src = realWorldPipenvSource;

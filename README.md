@@ -165,8 +165,7 @@ index.
 An editor for Python needs the interpreter of the `.venv`, with the
 project's packages in it. Point the editor's Python at `.venv/bin/python`,
 or let it find `.venv` in the project, as Pyright and the Python extension
-of VS Code do. Pyright resolved the imports of a fixture from a prefetched
-`.venv` offline. The language server itself comes from the editor's
+of VS Code do. The language server itself comes from the editor's
 installation, not from the project's lockfiles.
 
 ## Errors and fixes
@@ -214,14 +213,65 @@ missing file.
 
 ## Examples
 
-CI locks and builds the repository of
-[Pipenv](https://github.com/pypa/pipenv) itself at commit `fef0293`, whose
-Pipfile.lock pins 91 packages. The check `real-world-pipenv` builds its
-`default` and `develop` categories from the lockfile in
-`tests/real-world/pipenv/` and runs its unit tests in the sandbox, on
-x86_64-linux and aarch64-linux. On a workstation, `lock` of that repository
-takes about 70 s, and `prefetch` takes about 20 s once the store holds its
-files.
+[Pipenv](https://github.com/pypa/pipenv) develops itself with a Pipfile, so
+its repository is a Pipenv project like any other. A developer of Pipenv
+works on a clone of it as the Quickstart shows:
+
+```zsh
+git clone https://github.com/pypa/pipenv
+cd pipenv
+nix run github:nix-purifiers/pipenv-purifier -- lock
+nix run github:nix-purifiers/pipenv-purifier -- prefetch
+pipenv run pytest tests/unit
+```
+
+A flake can also package Pipenv without changing its repository. The
+lockfile then lives in the packaging flake, and `--lockfile` writes it
+there from a clone of the revision the flake builds:
+
+```zsh
+cd pipenv
+nix run github:nix-purifiers/pipenv-purifier -- lock --lockfile ../pipenv-packaging/pipenv-purifier.lock.json
+```
+
+The flake in `pipenv-packaging/` takes the repository as an input and
+builds it from that lockfile:
+
+```nix
+{
+  inputs.pipenv-purifier.url = "github:nix-purifiers/pipenv-purifier";
+  inputs.nixpkgs.follows = "pipenv-purifier/nixpkgs";
+  inputs.pipenv-src = {
+    url = "github:pypa/pipenv";
+    flake = false;
+  };
+
+  outputs = { nixpkgs, pipenv-purifier, pipenv-src, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = nixpkgs.legacyPackages.${system};
+      project = pipenv-purifier.lib.pipenv-purifier.buildPipenvProject {
+        inherit pkgs;
+        src = pipenv-src;
+        lockFile = ./pipenv-purifier.lock.json;
+        categories = [ "default" "develop" ];
+      };
+    in
+    {
+      # A virtual environment with the dependencies of Pipenv and its
+      # development tools.
+      packages.${system}.environment = project.environment;
+    };
+}
+```
+
+Pipenv's Pipfile does not list Pipenv itself as a local package, so
+`project.packages` is empty for this repository. A project whose Pipfile
+lists itself, as with `app = { path = ".", editable = true }`, gets its
+sdist and wheel as `project.packages.app`.
+
+When the flake moves `pipenv-src` to another revision, run the same `lock
+--lockfile` command in a clone of that revision.
 
 ## Credits
 

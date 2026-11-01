@@ -49,6 +49,26 @@ let
     pathSources."../shared" = ./fixtures/outside/shared;
   };
 
+  # A real-world project: Pipenv's own repository, which develops Pipenv
+  # with a Pipfile. Its Pipfile.lock pins 91 packages, among them Sphinx,
+  # pre-commit, gunicorn, and pyyaml 6.0.1, which has no wheel for Python
+  # 3.14 and builds from its sdist with Cython. The lockfile beside this
+  # file is what `pipenv-purifier lock` wrote for that commit.
+  realWorldPipenvSource = pkgs.fetchFromGitHub {
+    owner = "pypa";
+    repo = "pipenv";
+    rev = "fef029307389de23d0704407e4d0ebf1d1b17758";
+    hash = "sha256-3su6oPoEuY/sL3tQjMu44KRYkDhruJAMxTpzzdtYHJQ=";
+  };
+  realWorldPipenv = buildPipenvProject {
+    src = realWorldPipenvSource;
+    lockFile = ./real-world/pipenv/pipenv-purifier.lock.json;
+    categories = [
+      "default"
+      "develop"
+    ];
+  };
+
   # pypiserver imports cgi, which Python 3.13 removed; legacy-cgi provides
   # it.
   pypiserver = pkgs.python3.withPackages (ps: [
@@ -189,6 +209,27 @@ in
         touch $out
       '';
 
+  # Pipfile.lock changed, as after `pipenv install`, without
+  # `pipenv-purifier lock`: `sync` refuses before building and names the
+  # command to run.
+  sync-stale-lock =
+    runCommand "pipenv-purifier-test-sync-stale-lock" { nativeBuildInputs = [ cli ]; }
+      ''
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        cd project
+        export HOME=$TMPDIR
+        sed -i 's/"==25.3.0"/"==25.3.0" /' Pipfile.lock
+        if pipenv-purifier sync --inputs ${simple.interactive} 2> "$TMPDIR/error"; then
+          echo "sync accepted a pipenv-purifier.lock.json made for another Pipfile.lock" >&2
+          exit 1
+        fi
+        cat "$TMPDIR/error"
+        grep -q 'no longer matches Pipfile.lock.*run `pipenv-purifier lock`' "$TMPDIR/error"
+        test ! -e .venv/bin/simple
+        touch $out
+      '';
+
   # The lock run, against a local index that serves the files of the simple
   # fixture's lock: `pipenv lock`, then `pipenv-purifier lock`, which has to
   # find every file, resolve the same build requirements and record the same
@@ -252,6 +293,32 @@ in
       --publish-url http://127.0.0.1:8080/ --username user --password password
     test -f packages/simple-0.1.0.tar.gz
     test -f packages/simple-0.1.0-py3-none-any.whl
+    touch $out
+  '';
+
+  # Pipenv's unit tests, run from its source with the environment the
+  # purifier built from its lockfiles.
+  real-world-pipenv = runCommand "pipenv-purifier-test-real-world-pipenv" { } ''
+    cp -r ${realWorldPipenvSource} pipenv
+    chmod -R u+w pipenv
+    cd pipenv
+    # The tests run as `pipenv run pytest` runs them, inside the
+    # environment. Pipenv writes a cache of package names into the
+    # environment, so they run in a writable copy of it; a virtual
+    # environment finds its packages from the directory of its pyvenv.cfg.
+    cp -r ${realWorldPipenv.environment} "$TMPDIR/venv"
+    chmod -R u+w "$TMPDIR/venv"
+    export HOME=$TMPDIR VIRTUAL_ENV=$TMPDIR/venv
+    # test_release_tasks.py imports bs4, which Pipenv's Pipfile does not
+    # list, so no environment of that Pipfile has it. Four tests download
+    # from PyPI, which the sandbox cannot reach: the three tests of
+    # test_pylock.py that read a lockfile, and the live resolve.
+    "$VIRTUAL_ENV/bin/python" -m pytest tests/unit -q -p no:cacheprovider \
+      --ignore=tests/unit/test_release_tasks.py \
+      --deselect tests/unit/test_pylock.py::test_from_lockfile \
+      --deselect tests/unit/test_pylock.py::test_from_lockfile_with_custom_dev_groups \
+      --deselect tests/unit/test_pylock.py::test_from_lockfile_adds_package_index \
+      --deselect tests/unit/test_resolver_protocol_smoke.py::test_resolver_subprocess_live_resolve_against_pypi
     touch $out
   '';
 

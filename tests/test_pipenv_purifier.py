@@ -4,10 +4,12 @@ names and URLs, index pages, the throwaway Pipfile of a set of build
 requirements, the rewritten Pipfile.lock of `sync`, the scripts of a wheel,
 and the inputs hash. The flake check `unit` runs them."""
 
+import http.client
 import json
 import os
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 
 from packaging.requirements import Requirement
@@ -177,6 +179,38 @@ class Outputs(unittest.TestCase):
             with zipfile.ZipFile(wheel, "w") as z:
                 z.writestr("lib-1.0.dist-info/METADATA", "Name: lib\n")
             self.assertEqual(p.wheel_scripts(wheel), [])
+
+
+class Retries(unittest.TestCase):
+    def test_retries_a_broken_download(self):
+        calls = []
+
+        def read():
+            calls.append(1)
+            if len(calls) < 3:
+                raise http.client.IncompleteRead(b"partial", 10)
+            return "done"
+
+        self.assertEqual(p.fetch_with_retries("downloading x", read), "done")
+        self.assertEqual(len(calls), 3)
+
+    def test_gives_up_with_what_to_run(self):
+        def read():
+            raise ConnectionResetError("reset")
+
+        with self.assertRaisesRegex(p.Error, "downloading x failed 3 times.*run `pipenv-purifier lock` again"):
+            p.fetch_with_retries("downloading x", read)
+
+    def test_http_errors_are_not_retried(self):
+        calls = []
+
+        def read():
+            calls.append(1)
+            raise urllib.error.HTTPError("https://x", 404, "Not Found", None, None)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            p.fetch_with_retries("reading x", read)
+        self.assertEqual(len(calls), 1)
 
 
 class DamagedPipfileLock(unittest.TestCase):

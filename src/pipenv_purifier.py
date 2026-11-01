@@ -14,6 +14,7 @@ import argparse
 import base64
 import hashlib
 import html.parser
+import http.client
 import json
 import os
 import re
@@ -160,11 +161,12 @@ class Index:
             page,
             headers={"Accept": "application/vnd.pypi.simple.v1+json, text/html;q=0.1"},
         )
-        try:
+        def read():
             with urllib.request.urlopen(request, context=self.context) as response:
-                content_type = response.headers.get("Content-Type", "")
-                body = response.read()
-                final = response.geturl()
+                return response.headers.get("Content-Type", ""), response.read(), response.geturl()
+
+        try:
+            content_type, body, final = fetch_with_retries(f"reading {page}", read)
         except urllib.error.HTTPError as e:
             raise Error(f"the index {self.name} has no page for {project}: {e}") from e
         found = parse_index_page(body, content_type, final)
@@ -377,12 +379,38 @@ def unpack(ctx, archive):
     return target
 
 
+ATTEMPTS = 3
+
+
+def fetch_with_retries(what, read):
+    """Runs `read`, which reads from the network, and tries again when the
+    connection fails partway, as a long lock run over a busy network meets
+    now and then. After the last attempt the error says what failed and
+    what to run."""
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError) as e:
+            if attempt == ATTEMPTS:
+                raise Error(
+                    f"{what} failed {ATTEMPTS} times, the last time with {e!r}; "
+                    "check the network and run `pipenv-purifier lock` again"
+                ) from e
+            log(f"{what} failed ({e!r}); trying again")
+
+
 def download(ctx, url, directory):
     """Downloads a file and returns its path."""
     target = os.path.join(tempfile.mkdtemp(dir=directory), file_name(url) or "download")
-    with urllib.request.urlopen(url) as response, open(target, "wb") as out:
-        shutil.copyfileobj(response, out)
-    return target
+
+    def read():
+        with urllib.request.urlopen(url) as response, open(target, "wb") as out:
+            shutil.copyfileobj(response, out)
+        return target
+
+    return fetch_with_retries(f"downloading {url}", read)
 
 
 def pipfile_entry(requirements):
@@ -828,6 +856,27 @@ def offline_env(inputs):
     )
 
 
+def check_purifier_lock(root, pipfile_lock):
+    """pipenv-purifier.lock.json exists and was made for this Pipfile.lock,
+    as the Nix library checks too. The commands check it before they build,
+    so that the error names the project's file and the command to run."""
+    path = os.path.join(root, LOCK_FILE)
+    if not os.path.exists(path):
+        raise Error(f"{root} has no {LOCK_FILE}; run `pipenv-purifier lock` first")
+    try:
+        with open(path) as f:
+            purifier_lock = json.load(f)
+    except json.JSONDecodeError as e:
+        raise Error(f"{path} is not valid JSON ({e}); run `pipenv-purifier lock` to write it again") from e
+    if not isinstance(purifier_lock, dict) or purifier_lock.get("version") != FORMAT_VERSION:
+        raise Error(f"{path} is not a lockfile of this pipenv-purifier; run `pipenv-purifier lock` to write it again")
+    if purifier_lock.get("inputsHash") != inputs_hash(root, pipfile_lock):
+        raise Error(
+            f"{LOCK_FILE} no longer matches Pipfile.lock or the pyproject.toml of a local package, "
+            "as after `pipenv install`; run `pipenv-purifier lock`"
+        )
+
+
 def sync(root, inputs=None, categories_arg=None):
     """Installs the project's .venv offline, from the locked files that Nix
     fetched: the packages of an index with their hashes, the packages from
@@ -835,14 +884,13 @@ def sync(root, inputs=None, categories_arg=None):
     Pipfile.lock says, editable or not. Pipenv finds the .venv afterwards,
     so `pipenv run` and `pipenv shell` work as usual."""
     pipfile_lock = read_pipfile_lock(root)
-    if not os.path.exists(os.path.join(root, LOCK_FILE)):
-        raise Error(f"{root} has no {LOCK_FILE}; run `pipenv-purifier lock` first")
     result = run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=sys.executable))
     if result.returncode != 0:
         raise Error(
             "Pipfile.lock does not match the Pipfile, as after adding a package to the Pipfile by hand; "
             "run `pipenv lock`, then `pipenv-purifier lock`"
         )
+    check_purifier_lock(root, pipfile_lock)
     if inputs is None:
         log("fetching the locked files with Nix")
         inputs = nix_build(root, "interactive")
@@ -944,6 +992,7 @@ def publish(root, names, uv_publish_args, dists):
         for directory in dists:
             files += distributions(directory)
     else:
+        check_purifier_lock(root, read_pipfile_lock(root))
         available = local_packages(root)
         for name in names:
             if normalize(name) not in available:

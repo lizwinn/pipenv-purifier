@@ -65,8 +65,8 @@
           {
             checks = import ../../../tests {
               inherit pkgs;
-              overlay = self.overlays.default;
               inherit (self.packages.${system}) cli;
+              inherit (self.lib.pipenv-purifier) buildPipenvProject;
               inherit (self.lib) purifier;
             };
             treefmt.programs.nixfmt.enable = true;

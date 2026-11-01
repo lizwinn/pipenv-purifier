@@ -33,7 +33,7 @@ import zipfile
 from packaging.requirements import InvalidRequirement, Requirement
 
 LOCK_FILE = "pipenv-purifier.lock.json"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 # The build requirements PEP 517 prescribes, and pip uses, for a project
 # without a [build-system] table or without its `requires` key.
@@ -437,10 +437,40 @@ def toml_value(value):
     return json.dumps(value)
 
 
-def resolve_build_requirements(ctx, requires):
-    """Resolves one set of build requirements with `pipenv lock`, on a
-    throwaway Pipfile that depends on them and reads the project's indexes.
-    Returns the `default` packages of the resulting Pipfile.lock."""
+def resolve_build_requirements(ctx, requires, pinned):
+    """Resolves one set of build requirements with `pipenv lock`, at the
+    versions Pipfile.lock pins wherever the set allows them, and returns
+    the `default` packages of the resulting Pipfile.lock. `pinned` maps a
+    normalized project name to the one version Pipfile.lock pins for it.
+    A package that Pipfile.lock pins and the set resolves to another version
+    is pinned in the throwaway Pipfile, and the set is resolved again. When
+    the set does not allow the pinned version, the set keeps its own, and
+    the lockfile records the files of that version."""
+    pins = {}
+    resolved = resolve_pinned(ctx, requires, pins)
+    for _ in range(5):
+        drift = {
+            name: pinned[normalize(name)]
+            for name, package in resolved.items()
+            if normalize(name) in pinned and package_version(package) != pinned[normalize(name)]
+        }
+        if not drift:
+            break
+        pins.update(drift)
+        try:
+            resolved = resolve_pinned(ctx, requires, pins)
+        except Error as e:
+            log(f"keeping {', '.join(f'{n}=={v}' for n, v in sorted(drift.items()))} of Pipfile.lock out of the build requirements {', '.join(requires)}, which do not allow them: {e}")
+            for name in drift:
+                del pins[name]
+            break
+    return resolved
+
+
+def resolve_pinned(ctx, requires, pins):
+    """Resolves a set of build requirements with `pipenv lock`, on a
+    throwaway Pipfile that depends on them and on the versions `pins` names,
+    and reads the project's indexes."""
     by_name = {}
     for text in requires:
         try:
@@ -458,6 +488,8 @@ def resolve_build_requirements(ctx, requires):
             if key in source:
                 lines.append(f"{key} = {toml_value(source[key])}")
         lines.append("")
+    for name, version in pins.items():
+        by_name.setdefault(normalize(name), []).append(Requirement(f"{name}=={version}"))
     lines.append("[packages]")
     for name, requirements in sorted(by_name.items()):
         lines.append(f"{json.dumps(name)} = {toml_value(pipfile_entry(requirements))}")
@@ -545,11 +577,11 @@ def build_outputs(ctx, name, tree):
     if len(wheels) != 1 or len(sdists) != 1:
         raise Error(f"building {name} made {', '.join(built)}, not one sdist and one wheel")
     wheel = wheels[0]
+    # The Nix library reads the version and whether the wheel is the same
+    # on every system from the wheel's name.
     return {
-        "version": wheel.split("-")[1],
         "sdist": sdists[0],
         "wheel": wheel,
-        "pure": is_pure_wheel(wheel),
         "scripts": wheel_scripts(os.path.join(out, wheel)),
     }
 
@@ -601,6 +633,17 @@ def read_pipfile_lock(root):
     return pipfile_lock
 
 
+def content_hash(lockfile):
+    """The hash a lockfile records of its own content: the SHA-256 of its
+    JSON without the `contentHash` field, with sorted keys and no
+    whitespace, which is the text Nix's builtins.toJSON writes of it.
+    nix/lib/lock.nix computes the same hash, so an edit to the lockfile is
+    found before anything is fetched."""
+    rest = {k: v for k, v in lockfile.items() if k != "contentHash"}
+    text = json.dumps(rest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def check_pipfile_lock(root):
     """Pipfile.lock exists and matches the Pipfile."""
     pipfile_lock = read_pipfile_lock(root)
@@ -614,11 +657,45 @@ def check_pipfile_lock(root):
     return pipfile_lock, pipfile
 
 
-def lock(root, python):
-    pipfile_lock, _ = check_pipfile_lock(root)
+def pipfile_lock_pins(pipfile_lock):
+    """The packages of an index that Pipfile.lock pins: their keys, and the
+    version of each project name that Pipfile.lock pins at one version."""
+    keys = set()
+    versions = {}
+    for category in categories(pipfile_lock):
+        for name, entry in pipfile_lock[category].items():
+            if direct_kind(entry) == "index":
+                keys.add(package_key(name, entry))
+                versions.setdefault(normalize(name), set()).add(package_version(entry))
+    return keys, {name: v.pop() for name, v in versions.items() if len(v) == 1}
 
-    artifacts = {}
+
+def lock(root, python, lock_path):
+    """Writes the lockfile, which records only what Pipfile.lock cannot:
+    - `urls`: the URL of each file of an index, by the sha256 that
+      Pipfile.lock, or `buildPackages`, lists for it. The file's name is the
+      last segment of its URL.
+    - `buildPackages`: the sha256 hashes of the files of each package that
+      only the build requirements need, which Pipfile.lock does not pin.
+    - `buildRequirements` and `builds`: the resolved sets of build
+      requirements, and the set that building each package needs.
+    - `sources`: the hash of the checkout of each package from git, which
+      Pipfile.lock pins by commit, with the version a backend that reads git
+      gives it, and the hash of each file from a URL that Pipfile.lock
+      lists no hash for.
+    - `outputs`: the names of the sdist and wheel of each local package, and
+      its scripts, which Nix knows without building.
+    - `inputsHash` and `contentHash`, which tell a stale lockfile and an
+      edited one."""
+    pipfile_lock, _ = check_pipfile_lock(root)
+    locked_keys, pinned = pipfile_lock_pins(pipfile_lock)
+
+    urls = {}
+    # Every file of an index that the lock run found, by name, as (sha256,
+    # URL), and the files of each package by key.
+    named = {}
     packages = {}
+    build_packages = {}
     requirement_sets = []
     set_index = {}
     builds = {}
@@ -626,12 +703,14 @@ def lock(root, python):
     outputs = {}
     pending = []
 
-    def add_artifact(record):
-        known = artifacts.get(record["path"])
-        if known is not None and known != record:
-            raise Error(f"two locked files are both named {record['path']}: {known} and {record}")
-        artifacts[record["path"]] = record
-        return record["path"]
+    def add_url(digest, filename, url):
+        if file_name(url) != filename:
+            raise Error(f"the index serves {filename} at {url}, whose last segment names another file")
+        known = named.get(filename)
+        if known is not None and known != (digest, url):
+            raise Error(f"two locked files are both named {filename}: {known[1]} and {url}")
+        named[filename] = (digest, url)
+        urls[digest] = url
 
     def request(key, requires):
         canonical = tuple(sorted(requires))
@@ -660,7 +739,7 @@ def lock(root, python):
                 missing.append(digest)
                 continue
             filename, url = page[digest]
-            add_artifact({"path": filename, "url": url, "mirrors": [], "hash": sri(digest)})
+            add_url(digest, filename, url)
             if is_wheel(filename):
                 wheels.append(filename)
             elif filename.endswith((".tar.gz", ".zip", ".tar.bz2", ".tar.xz", ".tgz")):
@@ -686,9 +765,9 @@ def lock(root, python):
 
     def request_sdist(ctx, key, files):
         log(f"reading the build requirements of {key}")
-        archive = download(ctx, artifacts[files["sdist"]]["url"], ctx.workdir)
-        expected = artifacts[files["sdist"]]["hash"]
-        if sri(sha256_file(archive)) != expected:
+        expected, url = named[files["sdist"]]
+        archive = download(ctx, url, ctx.workdir)
+        if sha256_file(archive) != expected:
             raise Error(f"the sdist of {key} does not match its locked hash")
         requires, _ = tree_requirements(ctx, unpack(ctx, archive))
         request(key, requires)
@@ -712,42 +791,31 @@ def lock(root, python):
                     if not rev or not re.fullmatch(r"[0-9a-f]{40}", rev):
                         raise Error(f"Pipfile.lock pins {name} to {rev!r}, which is no commit; run `pipenv lock` again")
                     log(f"fetching {name} from {url} at {rev}")
+                    # The Nix library fetches the commit with its submodules
+                    # and without .git, because the build installs a wheel
+                    # it makes from the checkout.
                     _, nar_hash = prefetch_git(url, rev)
-                    path = f"git/{key}-{rev}"
-                    add_artifact(
-                        {
-                            "path": path,
-                            # The build installs a wheel it makes from the
-                            # checkout, so the checkout needs no .git, and
-                            # the entry no commit object to rebuild one.
-                            "git": {
-                                "url": url,
-                                "rev": rev,
-                                "submodules": True,
-                                "leaveDotGit": False,
-                                "commitObject": None,
-                            },
-                            "hash": nar_hash,
-                        }
-                    )
                     checkout = clone(ctx, url, rev)
                     subdirectory = entry.get("subdirectory")
                     tree = os.path.join(checkout, subdirectory) if subdirectory else checkout
                     log(f"reading the build requirements of {name}")
                     requires, version = tree_requirements(ctx, tree, want_version=True)
                     request(key, requires)
-                    sources[key] = {"artifact": path, "version": version}
+                    sources[key] = {"hash": nar_hash}
+                    if version is not None:
+                        sources[key]["version"] = version
                 elif kind == "file":
                     url = entry["file"]
+                    if url != without_credentials(url):
+                        raise Error(f"Pipfile.lock names {name} by a URL with credentials; give the Nix build a fetchurl that supplies them instead")
                     log(f"downloading {name} from {url}")
                     downloaded = download(ctx, url, workdir)
                     digest = sha256_file(downloaded)
                     locked = [h.partition(":")[2] for h in entry.get("hashes", [])]
                     if locked and digest not in locked:
                         raise Error(f"{url} has sha256 {digest}, which Pipfile.lock does not list for {name}")
-                    path = f"file/{file_name(url)}"
-                    add_artifact({"path": path, "url": without_credentials(url), "mirrors": [], "hash": sri(digest)})
-                    sources[key] = {"artifact": path, "version": None}
+                    if not locked:
+                        sources[key] = {"hash": sri(digest)}
                     if not is_wheel(url):
                         log(f"reading the build requirements of {name}")
                         requires, _ = tree_requirements(ctx, unpack(ctx, downloaded))
@@ -769,7 +837,7 @@ def lock(root, python):
             entry = requirement_sets[set_index[canonical]]
             log(f"resolving the build requirements {', '.join(canonical)}")
             try:
-                resolved = resolve_build_requirements(ctx, list(canonical))
+                resolved = resolve_build_requirements(ctx, list(canonical), pinned)
             except Error as e:
                 log(f"could not resolve {', '.join(canonical)}: {e}")
                 entry["error"] = str(e)
@@ -784,6 +852,8 @@ def lock(root, python):
                 # The set records each package by its key alone. Its markers
                 # are pip's to apply when it installs the set.
                 records.append(key)
+                if key not in locked_keys:
+                    build_packages[key] = sorted(h.partition(":")[2] for h in package.get("hashes", []))
                 if may_need_build(files) and key not in builds:
                     request_sdist(ctx, key, files)
             entry["packages"] = records
@@ -791,30 +861,52 @@ def lock(root, python):
         for name in local_packages(root):
             path = local_package_paths(root)[name]
             log(f"building {name} to record its outputs")
-            outputs[name] = {"path": path, **build_outputs(ctx, name, os.path.normpath(os.path.join(root, path)))}
+            outputs[name] = build_outputs(ctx, name, os.path.normpath(os.path.join(root, path)))
 
     result = {
         "version": FORMAT_VERSION,
         "inputsHash": inputs_hash(root, pipfile_lock),
-        "artifacts": [artifacts[k] for k in sorted(artifacts)],
-        "packages": dict(sorted(packages.items())),
+        "urls": dict(sorted(urls.items())),
+        "buildPackages": dict(sorted(build_packages.items())),
         "buildRequirements": requirement_sets,
         "builds": dict(sorted(builds.items())),
         "sources": dict(sorted(sources.items())),
         "outputs": dict(sorted(outputs.items())),
     }
-    with open(os.path.join(root, LOCK_FILE), "w") as f:
+    result["contentHash"] = content_hash(result)
+    with open(lock_path, "w") as f:
         json.dump(result, f, indent=2)
         f.write("\n")
-    log(f"wrote {LOCK_FILE}: {len(packages)} packages, {len(requirement_sets)} sets of build requirements")
+    log(
+        f"wrote {os.path.basename(lock_path)}: the URLs of {len(urls)} files, "
+        f"{len(build_packages)} packages beyond Pipfile.lock, {len(requirement_sets)} sets of build requirements"
+    )
 
 
-# Nix builds, sync and publish
+def update(root, python, lock_path, names):
+    """Updates both lockfiles: Pipenv re-resolves every package with `pipenv
+    lock`, or the packages `names` with `pipenv upgrade`, which writes
+    Pipfile.lock and installs nothing, and the lock run then writes the
+    pipenv-purifier lockfile for the new Pipfile.lock."""
+    args = ["pipenv", "upgrade", *names] if names else ["pipenv", "lock"]
+    log(f"re-resolving with `{' '.join(args)}`")
+    result = subprocess.run(args, cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
+    if result.returncode != 0:
+        raise Error(f"`{' '.join(args)}` failed; its error above says why")
+    lock(root, python, lock_path)
 
 
-def nix_build(root, attribute, package=None):
+# Nix builds, prefetch and publish
+
+# Where `prefetch` keeps its garbage-collector root, in the project.
+ROOT_DIR = ".pipenv-purifier"
+
+
+def nix_build(root, attribute, lock_path, out_link=None):
     """Builds, with the Nix library this program was installed with, an
-    attribute of nix/lib/cli.nix for the project. Returns the store path."""
+    attribute of nix/lib/cli.nix for the project, and returns the store
+    path. With `out_link`, the result is also a garbage-collector root at
+    that path."""
     library = os.environ.get("PIPENV_PURIFIER_NIX_LIB")
     nixpkgs = os.environ.get("PIPENV_PURIFIER_NIXPKGS")
     purifier = os.environ.get("PIPENV_PURIFIER_LIBRARY")
@@ -825,18 +917,17 @@ def nix_build(root, attribute, package=None):
         )
     args = [
         "nix-build",
-        "--no-out-link",
+        *(["--out-link", out_link] if out_link else ["--no-out-link"]),
         os.path.join(library, "cli.nix"),
         "--arg", "nixpkgs", nixpkgs,
         "--argstr", "purifier", purifier,
         "--argstr", "src", root,
         "--argstr", "attribute", attribute,
+        "--argstr", "lockFile", lock_path,
     ]
-    if package is not None:
-        args += ["--argstr", "package", package]
     result = subprocess.run(args, text=True, stdout=subprocess.PIPE, check=False)
     if result.returncode != 0:
-        raise Error(f"the Nix build of {package or attribute} failed; its error above says what to run")
+        raise Error(f"the Nix build of the {attribute} failed; its error above says what to run")
     return result.stdout.strip().splitlines()[-1]
 
 
@@ -851,16 +942,16 @@ def offline_env(inputs):
         PIPENV_YES="1",
         PIPENV_NOSPIN="1",
         # Pipenv notes that it installs into the virtual environment it
-        # runs in, which is what `sync` asks of it.
+        # runs in, which is what `prefetch` asks of it.
         PIPENV_VERBOSITY="-1",
     )
 
 
-def check_purifier_lock(root, pipfile_lock):
-    """pipenv-purifier.lock.json exists and was made for this Pipfile.lock,
-    as the Nix library checks too. The commands check it before they build,
-    so that the error names the project's file and the command to run."""
-    path = os.path.join(root, LOCK_FILE)
+def check_purifier_lock(root, pipfile_lock, path):
+    """The pipenv-purifier lockfile at `path` exists, is unedited, and was
+    made for this Pipfile.lock, as the Nix library checks too. The commands
+    check it before they build, so that the error names the file and the
+    command to run."""
     if not os.path.exists(path):
         raise Error(f"{root} has no {LOCK_FILE}; run `pipenv-purifier lock` first")
     try:
@@ -870,6 +961,8 @@ def check_purifier_lock(root, pipfile_lock):
         raise Error(f"{path} is not valid JSON ({e}); run `pipenv-purifier lock` to write it again") from e
     if not isinstance(purifier_lock, dict) or purifier_lock.get("version") != FORMAT_VERSION:
         raise Error(f"{path} is not a lockfile of this pipenv-purifier; run `pipenv-purifier lock` to write it again")
+    if purifier_lock.get("contentHash") != content_hash(purifier_lock):
+        raise Error(f"{path} was edited after `pipenv-purifier lock` wrote it; run `pipenv-purifier lock` to write it again")
     if purifier_lock.get("inputsHash") != inputs_hash(root, pipfile_lock):
         raise Error(
             f"{LOCK_FILE} no longer matches Pipfile.lock or the pyproject.toml of a local package, "
@@ -877,12 +970,16 @@ def check_purifier_lock(root, pipfile_lock):
         )
 
 
-def sync(root, inputs=None, categories_arg=None):
-    """Installs the project's .venv offline, from the locked files that Nix
-    fetched: the packages of an index with their hashes, the packages from
-    git and URLs from their checkouts and files, and the local packages as
-    Pipfile.lock says, editable or not. Pipenv finds the .venv afterwards,
-    so `pipenv run` and `pipenv shell` work as usual."""
+def prefetch(root, lock_path, inputs=None, categories_arg=None):
+    """Realizes in the Nix store everything the everyday loop needs: the
+    Python of the build, and the locked files of every category for this
+    system, development and test packages included. A garbage-collector root
+    in the project's .pipenv-purifier/ keeps them. Then it installs the
+    project's .venv from them, offline: the packages of an index with their
+    hashes, the packages from git and URLs from their wheels and files, and
+    the local packages as Pipfile.lock says, editable or not. Pipenv finds
+    the .venv afterwards, so `pipenv run` and `pipenv shell` work with no
+    network, and so does an editor that uses the .venv's Python."""
     pipfile_lock = read_pipfile_lock(root)
     result = run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=sys.executable))
     if result.returncode != 0:
@@ -890,10 +987,13 @@ def sync(root, inputs=None, categories_arg=None):
             "Pipfile.lock does not match the Pipfile, as after adding a package to the Pipfile by hand; "
             "run `pipenv lock`, then `pipenv-purifier lock`"
         )
-    check_purifier_lock(root, pipfile_lock)
+    check_purifier_lock(root, pipfile_lock, lock_path)
+    source = inputs
     if inputs is None:
         log("fetching the locked files with Nix")
-        inputs = nix_build(root, "interactive")
+        os.makedirs(os.path.join(root, ROOT_DIR), exist_ok=True)
+        source = os.path.join(ROOT_DIR, "inputs")
+        inputs = nix_build(root, "prefetch", lock_path, out_link=os.path.join(root, source))
     with open(os.path.join(inputs, "direct.json")) as f:
         direct = json.load(f)
     venv = os.path.join(root, ".venv")
@@ -920,13 +1020,16 @@ def sync(root, inputs=None, categories_arg=None):
         )
         if result.returncode != 0:
             raise Error("`pipenv sync` failed")
-    log(f"installed {venv}; Pipenv uses it for `pipenv run` and `pipenv shell`")
+    log(
+        f"installed {venv} from the files in {source}; "
+        "`pipenv run` and `pipenv shell` use it with no network, and so does an editor pointed at .venv/bin/python"
+    )
 
 
 def rewrite(pipfile_lock, direct, local_path, keep_editable):
     """A copy of Pipfile.lock in which every package from git is a path to
     the wheel Nix built of it, every package from a URL a path to its locked
-    file, and every local path absolute. `sync` keeps local packages
+    file, and every local path absolute. `prefetch` keeps local packages
     editable when Pipfile.lock says so."""
     out = json.loads(json.dumps(pipfile_lock))
     for category in categories(out):
@@ -980,26 +1083,18 @@ def distributions(directory):
     ]
 
 
-def publish(root, names, uv_publish_args, dists):
-    """Uploads the sdist and wheel of local packages with `uv publish`: the
-    ones Nix builds for `names` (every local package when empty), or the
-    ones in `dists`, packages Nix built before. Pipenv has no upload command
-    of its own. twine 6.2, the twine of nixpkgs, refuses metadata version
-    2.5, which current build backends such as hatchling write, and uv
-    uploads them."""
-    files = []
-    if dists:
-        for directory in dists:
-            files += distributions(directory)
-    else:
-        check_purifier_lock(root, read_pipfile_lock(root))
-        available = local_packages(root)
-        for name in names:
-            if normalize(name) not in available:
-                raise Error(f"{name} is not a local package of the project; the local packages are {', '.join(available)}")
-        for name in names or available:
-            log(f"building {name} with Nix")
-            files += distributions(nix_build(root, "package", normalize(name)))
+def publish(root, lock_path, uv_publish_args, release=None):
+    """Uploads with `uv publish` the `release` of the project, the sdists
+    and wheels of its local packages that Nix built: built now, or the one
+    at `release` that Nix built before. Pipenv has no upload command of its
+    own. twine 6.2, the twine of nixpkgs, refuses metadata version 2.5,
+    which current build backends such as hatchling write, and uv uploads
+    them."""
+    if release is None:
+        check_purifier_lock(root, read_pipfile_lock(root), lock_path)
+        log("building the release with Nix")
+        release = nix_build(root, "release", lock_path)
+    files = distributions(release)
     if not files:
         raise Error("there is nothing to upload")
     result = subprocess.run(["uv", "publish", *uv_publish_args, *files], cwd=root, check=False)
@@ -1017,43 +1112,58 @@ def main(argv=None):
         default=os.environ.get("PIPENV_PURIFIER_PYTHON", sys.executable),
         help="the Python that runs the build backends and Pipenv's resolver",
     )
-    sync_parser = sub.add_parser("sync", help="install the project's .venv offline from the locked files")
-    sync_parser.add_argument("--project", default=".", help="the directory that holds the Pipfile")
-    sync_parser.add_argument(
-        "--inputs",
-        help="the inputs Nix built for the project (the `interactive` output of buildPipenvProject); built with Nix when absent",
+    update_parser = sub.add_parser(
+        "update",
+        help="re-resolve Pipfile.lock with Pipenv, every package or the ones named, then write the lockfile",
     )
-    sync_parser.add_argument(
+    update_parser.add_argument("--project", default=".", help="the directory that holds the Pipfile")
+    update_parser.add_argument(
+        "--python",
+        default=os.environ.get("PIPENV_PURIFIER_PYTHON", sys.executable),
+        help="the Python that runs the build backends and Pipenv's resolver",
+    )
+    update_parser.add_argument("packages", nargs="*", help="the packages to update (every package when absent)")
+    prefetch_parser = sub.add_parser(
+        "prefetch",
+        help="fetch everything the everyday loop needs into the Nix store and install the project's .venv from it, offline",
+    )
+    prefetch_parser.add_argument("--project", default=".", help="the directory that holds the Pipfile")
+    prefetch_parser.add_argument(
+        "--inputs",
+        help="the inputs Nix built for the project (the `prefetch` attribute of nix/lib/cli.nix); built with Nix when absent",
+    )
+    prefetch_parser.add_argument(
         "--categories",
         nargs="+",
         help="the package categories to install (default: `default` and `develop`, as `pipenv sync --dev`)",
     )
-    publish_parser = sub.add_parser("publish", help="build local packages with Nix and upload what Nix built with `uv publish`")
+    publish_parser = sub.add_parser("publish", help="upload with `uv publish` the release that Nix builds")
     publish_parser.add_argument("--project", default=".", help="the directory that holds the Pipfile")
     publish_parser.add_argument(
-        "--package",
-        action="append",
-        default=[],
-        help="a local package to publish (repeatable; every local package with a build when absent)",
-    )
-    publish_parser.add_argument(
-        "--dist",
-        action="append",
-        default=[],
-        help="a package that buildPipenvProject built, whose sdist and wheel to upload instead of building (repeatable)",
+        "--release",
+        help="the `release` that buildPipenvProject built before, to upload instead of building it",
     )
     publish_parser.add_argument("uv_publish_args", nargs=argparse.REMAINDER, help="arguments for `uv publish`, after `--`")
+    for sub_parser in (lock_parser, update_parser, prefetch_parser, publish_parser):
+        sub_parser.add_argument(
+            "--lockfile",
+            help=f"the pipenv-purifier lockfile, which may lie outside the project (default: {LOCK_FILE} in the project)",
+        )
     args = parser.parse_args(argv)
+    root = os.path.abspath(args.project)
+    lock_path = os.path.abspath(args.lockfile) if args.lockfile else os.path.join(root, LOCK_FILE)
     try:
         if args.command == "lock":
-            lock(os.path.abspath(args.project), args.python)
-        elif args.command == "sync":
-            sync(os.path.abspath(args.project), args.inputs, args.categories)
+            lock(root, args.python, lock_path)
+        elif args.command == "update":
+            update(root, args.python, lock_path, args.packages)
+        elif args.command == "prefetch":
+            prefetch(root, lock_path, args.inputs, args.categories)
         elif args.command == "publish":
             extra = args.uv_publish_args
             if extra and extra[0] == "--":
                 extra = extra[1:]
-            publish(os.path.abspath(args.project), args.package, extra, args.dist)
+            publish(root, lock_path, extra, args.release)
     except Error as e:
         log(str(e))
         return 1

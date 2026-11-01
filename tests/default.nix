@@ -4,26 +4,24 @@
 # access is the fixed-output fetches of locked files.
 {
   pkgs,
-  # The flake's default package overlay, which adds buildPipenvProject.
-  overlay,
   cli,
+  # The builder of the purifier contract, `lib.pipenv-purifier` of this
+  # flake.
+  buildPipenvProject,
   # The shared purifier library, `lib.purifier` of its flake.
   purifier,
 }:
 let
-  inherit (pkgs) lib;
+  inherit (pkgs) lib runCommand;
 
-  # Every fixture builds the way a consumer's package does: through
-  # buildPipenvProject of a package set the overlay applies to.
-  withOverlay = pkgs.extend overlay;
-  inherit (withOverlay) buildPipenvProject runCommand;
+  build = args: buildPipenvProject ({ inherit pkgs; } // args);
 
   # A hatchling project, installed from its own directory, that depends on
   # attrs, which installs from its wheel, and on docopt, which has only an
   # sdist and is built with the locked setuptools. six is a development
-  # package.
-  simple = buildPipenvProject { src = ./fixtures/simple; };
-  simpleDevelop = buildPipenvProject {
+  # package. The Pipfile's script `test` runs its unit tests.
+  simple = build { src = ./fixtures/simple; };
+  simpleDevelop = build {
     src = ./fixtures/simple;
     categories = [
       "default"
@@ -31,7 +29,7 @@ let
     ];
   };
   # The custom category `tools` alone.
-  simpleTools = buildPipenvProject {
+  simpleTools = build {
     src = ./fixtures/simple;
     categories = [ "tools" ];
   };
@@ -40,13 +38,32 @@ let
   # index: attrs from git (built with hatch-vcs, which reads its version
   # from git), six from a GitHub archive URL, and packages from a local
   # directory, a local sdist and a local wheel.
-  sources = buildPipenvProject { src = ./fixtures/sources; };
+  sources = build { src = ./fixtures/sources; };
 
   # A project that depends on an editable path outside its directory,
   # which the build gets through pathSources.
-  outside = buildPipenvProject {
+  outside = build {
     src = ./fixtures/outside/app;
     pathSources."../shared" = ./fixtures/outside/shared;
+  };
+
+  # The simple fixture without either lockfile, as a flake that packages a
+  # project without changing it holds its source, and the lockfiles kept
+  # apart from it.
+  simpleWithoutLockfiles = builtins.path {
+    path = ./fixtures/simple;
+    name = "simple-without-lockfiles";
+    filter =
+      path: _:
+      !builtins.elem (baseNameOf path) [
+        "pipenv-purifier.lock.json"
+        "Pipfile.lock"
+      ];
+  };
+  external = build {
+    src = simpleWithoutLockfiles;
+    lockFile = ./fixtures/simple/pipenv-purifier.lock.json;
+    pipfileLock = ./fixtures/simple/Pipfile.lock;
   };
 
   # A real-world project: Pipenv's own repository, which develops Pipenv
@@ -60,7 +77,7 @@ let
     rev = "fef029307389de23d0704407e4d0ebf1d1b17758";
     hash = "sha256-3su6oPoEuY/sL3tQjMu44KRYkDhruJAMxTpzzdtYHJQ=";
   };
-  realWorldPipenv = buildPipenvProject {
+  realWorldPipenv = build {
     src = realWorldPipenvSource;
     lockFile = ./real-world/pipenv/pipenv-purifier.lock.json;
     categories = [
@@ -76,17 +93,36 @@ let
     ps.legacy-cgi
   ]);
 
-  # Every locked file of the simple fixture, in one directory, which a
-  # local package index serves.
+  # Every locked file of the simple fixture, for every system, in one
+  # directory, which a local package index serves.
+  simpleLock = builtins.fromJSON (builtins.readFile ./fixtures/simple/pipenv-purifier.lock.json);
+  simplePipfileLock = builtins.fromJSON (builtins.readFile ./fixtures/simple/Pipfile.lock);
   simpleFiles = pkgs.linkFarm "pipenv-purifier-test-simple-files" (
-    lib.mapAttrsToList (path: file: {
-      name = path;
-      path = pkgs.fetchurl {
-        name = simple.lock.storeName path;
-        inherit (file) url hash;
-      };
-    }) simple.lock.files
+    map (entry: {
+      name = entry.path;
+      path = purifier.fetchEntry { inherit pkgs; } entry;
+    }) (lib.attrValues (import ../nix/lib/lock.nix { src = ./fixtures/simple; }).views.files)
   );
+  # An older six, which the local index of conformance-update serves.
+  six16 = pkgs.fetchurl {
+    url = "https://files.pythonhosted.org/packages/d9/5a/e7c31adbe875f2abbb91bd84cf2dc52d792b5a01506781dbcf25c91daf11/six-1.16.0-py2.py3-none-any.whl";
+    sha256 = "8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254";
+  };
+  attrsHashes = map (lib.removePrefix "sha256:") simplePipfileLock.default.attrs.hashes;
+
+  # A copy of the simple fixture's pipenv-purifier.lock.json, changed by
+  # `change`, whose contentHash is that of its new content, as a lock run
+  # would write it.
+  rehashed =
+    name: change:
+    let
+      changed = removeAttrs (change simpleLock) [ "contentHash" ];
+    in
+    builtins.toFile "${name}.json" (
+      builtins.toJSON (
+        changed // { contentHash = builtins.hashString "sha256" (builtins.toJSON changed); }
+      )
+    );
 
   # Starts a package index on 127.0.0.1:8080 that serves a directory and
   # takes uploads into it without authentication, and waits until it
@@ -113,13 +149,23 @@ let
       touch $out
     '';
 
-  # Runs `pipenv-purifier sync` on a copy of a fixture, with the inputs Nix
-  # built for it, then runs a script of the .venv it installed. `edit`
+  # Runs `pipenv-purifier prefetch` on a copy of a fixture, with the inputs
+  # Nix built for it, then runs a script of the .venv it installed. `edit`
   # changes the project's source afterwards, and the script runs again: a
-  # local package installed as editable prints `edited`.
-  syncs =
-    name: fixture: project: script: expected: edit: edited:
-    runCommand "pipenv-purifier-test-sync-${name}" { nativeBuildInputs = [ cli ]; } ''
+  # local package installed as editable prints `edited`. `loop` runs after
+  # that, with Pipenv on the PATH; the sandbox has no network.
+  prefetches =
+    name:
+    {
+      fixture,
+      project,
+      script,
+      expected,
+      edit,
+      edited,
+      loop ? "",
+    }:
+    runCommand "pipenv-purifier-test-${name}" { nativeBuildInputs = [ cli ]; } ''
       cp -r ${fixture} project
       chmod -R u+w project
       cd project
@@ -127,7 +173,7 @@ let
       # seconds and the size of the source, so the edit right after the
       # first run would go unseen through a cache.
       export HOME=$TMPDIR PYTHONDONTWRITEBYTECODE=1
-      pipenv-purifier sync --inputs ${project.interactive}
+      pipenv-purifier prefetch --inputs ${project.prefetch}
       check() {
         output=$(.venv/bin/${script})
         echo "$output"
@@ -139,8 +185,63 @@ let
       check ${lib.escapeShellArg expected}
       ${edit}
       check ${lib.escapeShellArg edited}
+      PATH=${pkgs.pipenv}/bin:$PATH
+      ${loop}
       touch $out
     '';
+
+  # Copies the simple fixture and lets `damage` change it. Then
+  # `pipenv-purifier prefetch` and the Nix library's reading of the
+  # lockfiles both have to refuse the project, with errors that match
+  # `pattern`. Nix evaluates the reading in the build, with a store that
+  # writes nothing, and the check reads the error that a build would show:
+  # the problems of the lock in memory, which checkLock throws, or the
+  # error of reading a file that is not JSON.
+  # With `command = false`, only the Nix library is asked: the command
+  # leaves that check to the Nix build it runs.
+  refuses =
+    name:
+    {
+      damage,
+      pattern,
+      command ? true,
+    }:
+    runCommand "pipenv-purifier-test-${name}"
+      {
+        nativeBuildInputs = [
+          cli
+          pkgs.nix
+        ];
+      }
+      ''
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        cd project
+        export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/nix-state NIX_CONF_DIR=$TMPDIR
+        ${damage}
+        ${lib.optionalString command ''
+          if pipenv-purifier prefetch --inputs ${simple.prefetch} 2> "$TMPDIR/command-error"; then
+            echo "prefetch accepted the damaged project" >&2
+            exit 1
+          fi
+          cat "$TMPDIR/command-error"
+          grep -q ${lib.escapeShellArg pattern} "$TMPDIR/command-error"
+          test ! -e .venv/bin/simple
+        ''}
+        if nix-instantiate --eval --strict --store dummy:// \
+          --expr "let lock = import ${../nix/lib}/lock.nix { src = $PWD; }; in if lock.problems == [ ] then builtins.deepSeq lock.entries true else throw (builtins.concatStringsSep \"\n\" lock.problems)" \
+          2> "$TMPDIR/nix-error"; then
+          echo "the Nix library accepted the damaged project" >&2
+          exit 1
+        fi
+        cat "$TMPDIR/nix-error"
+        grep -q ${lib.escapeShellArg pattern} "$TMPDIR/nix-error"
+        touch $out
+      '';
+
+  # The simple fixture's sdist and wheel, built a second time in a
+  # derivation of another name.
+  simpleAgain = simple.packages.simple.overrideAttrs { pname = "simple-again"; };
 in
 {
   simple =
@@ -151,6 +252,10 @@ in
   simple-program =
     runs "simple-program" (lib.getExe simple.programs.simple)
       "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";
+
+  # The fixture's unit tests, which the Pipfile's script `test` runs, with
+  # the packages of every category.
+  simple-tests = simple.tests;
 
   # `default` alone leaves out the development package six and the package
   # of the custom category `tools`, and each category adds its packages.
@@ -163,12 +268,14 @@ in
   '';
 
   # A local package's sdist and wheel, named without building by the
-  # lockfile.
+  # lockfile, and the release, which holds both.
   simple-package = runCommand "pipenv-purifier-test-simple-package" { } ''
     test -f ${simple.packages.simple.artifacts."simple-0.1.0.tar.gz"}
     test -f ${simple.packages.simple.artifacts."simple-0.1.0-py3-none-any.whl"}
     test -f ${simple.packages.simple.artifacts.sdist}
     test -f ${simple.packages.simple.artifacts.wheel}
+    test -f ${simple.release}/simple-0.1.0.tar.gz
+    test -f ${simple.release}/simple-0.1.0-py3-none-any.whl
     touch $out
   '';
 
@@ -176,31 +283,60 @@ in
     runs "sources" "${sources.environment}/bin/sources"
       "attrs=25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0";
 
+  # `fetches` lists the git checkout and the archive from a URL with the
+  # files of the index.
+  sources-fetches =
+    let
+      kinds = map (entry: if entry ? git then "git" else "file") sources.fetches;
+      paths = map (entry: entry.path) sources.fetches;
+    in
+    assert lib.elem "git" kinds;
+    assert lib.length paths == lib.length (lib.unique paths);
+    assert lib.any (path: lib.hasPrefix "file/" path) paths;
+    runCommand "pipenv-purifier-test-sources-fetches" { } "touch $out";
+
   outside = runs "outside" "${outside.environment}/bin/outside-app" "outside-app with shared 0.2.0";
 
-  sync-sources =
-    syncs "sources" ./fixtures/sources sources "sources"
-      "attrs=25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0"
-      "sed -i 's/attrs=/attrs: /' src/sources/__init__.py"
-      "attrs: 25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0";
+  prefetch-sources = prefetches "prefetch-sources" {
+    fixture = ./fixtures/sources;
+    project = sources;
+    script = "sources";
+    expected = "attrs=25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0";
+    edit = "sed -i 's/attrs=/attrs: /' src/sources/__init__.py";
+    edited = "attrs: 25.3.0 six=1.17.0 localdir 0.3.0 localsdist 0.4.0 localwheel 0.5.0";
+  };
 
-  sync-simple =
-    syncs "simple" ./fixtures/simple simple "simple" "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
-      "sed -i 's/simple {versions}/edited {versions}/' src/simple/__init__.py"
-      "edited attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";
+  # After `prefetch`, the everyday loop works with no network: `pipenv run`
+  # of the project's script and of its tests, in the .venv that `prefetch`
+  # installed, after an edit to the editable local package.
+  conformance-offline = prefetches "conformance-offline" {
+    fixture = ./fixtures/simple;
+    project = simple;
+    script = "simple";
+    expected = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";
+    edit = "sed -i 's/simple {versions}/edited {versions}/' src/simple/__init__.py";
+    edited = "edited attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";
+    loop = ''
+      sed -i 's/edited {versions}/simple {versions}/' src/simple/__init__.py
+      test "$(pipenv --venv)" = "$PWD/.venv"
+      pipenv run simple
+      pipenv run test
+    '';
+  };
 
-  # A package added to the Pipfile by hand, without `pipenv lock`: `sync`
-  # refuses before installing anything and names the commands to run.
-  sync-stale-pipfile =
-    runCommand "pipenv-purifier-test-sync-stale-pipfile" { nativeBuildInputs = [ cli ]; }
+  # A package added to the Pipfile by hand, without `pipenv lock`:
+  # `prefetch` refuses before installing anything and names the commands to
+  # run.
+  prefetch-stale-pipfile =
+    runCommand "pipenv-purifier-test-prefetch-stale-pipfile" { nativeBuildInputs = [ cli ]; }
       ''
         cp -r ${./fixtures/simple} project
         chmod -R u+w project
         cd project
         export HOME=$TMPDIR
         sed -i 's/^attrs = "==25.3.0"$/attrs = "==25.3.0"\nidna = "*"/' Pipfile
-        if pipenv-purifier sync --inputs ${simple.interactive} 2> "$TMPDIR/error"; then
-          echo "sync accepted a Pipfile that Pipfile.lock does not match" >&2
+        if pipenv-purifier prefetch --inputs ${simple.prefetch} 2> "$TMPDIR/error"; then
+          echo "prefetch accepted a Pipfile that Pipfile.lock does not match" >&2
           exit 1
         fi
         cat "$TMPDIR/error"
@@ -210,37 +346,92 @@ in
       '';
 
   # Pipfile.lock changed, as after `pipenv install`, without
-  # `pipenv-purifier lock`: `sync` refuses before building and names the
-  # command to run.
-  sync-stale-lock =
-    runCommand "pipenv-purifier-test-sync-stale-lock" { nativeBuildInputs = [ cli ]; }
-      ''
-        cp -r ${./fixtures/simple} project
-        chmod -R u+w project
-        cd project
-        export HOME=$TMPDIR
-        sed -i 's/"==25.3.0"/"==25.3.0" /' Pipfile.lock
-        if pipenv-purifier sync --inputs ${simple.interactive} 2> "$TMPDIR/error"; then
-          echo "sync accepted a pipenv-purifier.lock.json made for another Pipfile.lock" >&2
-          exit 1
-        fi
-        cat "$TMPDIR/error"
-        grep -q 'no longer matches Pipfile.lock.*run `pipenv-purifier lock`' "$TMPDIR/error"
-        test ! -e .venv/bin/simple
-        touch $out
-      '';
+  # `pipenv-purifier lock`.
+  conformance-stale = refuses "conformance-stale" {
+    damage = ''sed -i 's/"==25.3.0"/"==25.3.0" /' Pipfile.lock'';
+    pattern = "match.*un `pipenv-purifier lock`";
+  };
+
+  # The URL of the attrs wheel recorded under another hash: the lockfile's
+  # contentHash no longer matches, and, with the contentHash written again,
+  # neither lockfile lists the hash.
+  conformance-tampered =
+    let
+      wheelHash = lib.head attrsHashes;
+      tampered = rehashed "tampered" (
+        l:
+        l
+        // {
+          urls = removeAttrs l.urls [ wheelHash ] // {
+            ${lib.fixedWidthString 64 "0" ""} = l.urls.${wheelHash};
+          };
+        }
+      );
+    in
+    pkgs.linkFarm "pipenv-purifier-test-conformance-tampered" {
+      edited = refuses "conformance-tampered-edited" {
+        damage = ''sed -i '0,/"https:/s|"https:|"http:|' pipenv-purifier.lock.json'';
+        pattern = "edited after `pipenv-purifier lock`.*un `pipenv-purifier lock`";
+      };
+      rehashed = refuses "conformance-tampered-rehashed" {
+        damage = "cp ${tampered} pipenv-purifier.lock.json";
+        pattern = "neither Pipfile.lock nor its build packages list.*Run `pipenv-purifier lock`";
+        command = false;
+      };
+    };
+
+  # A lockfile without what the build needs: no lockfile at all, no URL of
+  # any file of a package that Pipfile.lock pins, and no hashes of the
+  # packages that only the build requirements need.
+  conformance-missing = pkgs.linkFarm "pipenv-purifier-test-conformance-missing" {
+    lockfile = refuses "conformance-missing-lockfile" {
+      damage = "rm pipenv-purifier.lock.json";
+      pattern = "pipenv-purifier.lock.json.*pipenv-purifier lock";
+    };
+    package = refuses "conformance-missing-package" {
+      damage = "cp ${
+        rehashed "missing-package" (l: l // { urls = removeAttrs l.urls attrsHashes; })
+      } pipenv-purifier.lock.json";
+      pattern = "no files of attrs==25.3.0, which Pipfile.lock pins.*Run `pipenv-purifier lock`";
+      command = false;
+    };
+    build-package = refuses "conformance-missing-build-package" {
+      damage = "cp ${
+        rehashed "missing-build-package" (l: l // { buildPackages = { }; })
+      } pipenv-purifier.lock.json";
+      pattern = "which a set of build requirements needs.*Run `pipenv-purifier lock`";
+      command = false;
+    };
+  };
+
+  # A lockfile that is not valid: not JSON, JSON that is no lockfile of
+  # this format, and a lockfile of another format version.
+  conformance-malformed = pkgs.linkFarm "pipenv-purifier-test-conformance-malformed" {
+    not-json = refuses "conformance-malformed-not-json" {
+      damage = "head -c 100 ${./fixtures/simple/pipenv-purifier.lock.json} > pipenv-purifier.lock.json";
+      pattern = "pipenv-purifier lock";
+    };
+    not-a-lockfile = refuses "conformance-malformed-not-a-lockfile" {
+      damage = ''echo '{"hello": "world"}' > pipenv-purifier.lock.json'';
+      pattern = "not a .*lockfile.*un `pipenv-purifier lock`";
+    };
+    other-version = refuses "conformance-malformed-other-version" {
+      damage = "cp ${rehashed "other-version" (l: l // { version = 99; })} pipenv-purifier.lock.json";
+      pattern = "un `pipenv-purifier lock`";
+    };
+  };
 
   # The lock run, against a local index that serves the files of the simple
   # fixture's lock: `pipenv lock`, then `pipenv-purifier lock`, which has to
   # find every file, resolve the same build requirements and record the same
   # outputs as the committed lockfile. The index serves PEP 503 pages, so
   # this also covers the lock tool's reading of HTML index pages.
-  lock-run =
-    runCommand "pipenv-purifier-test-lock-run"
+  conformance-relock =
+    runCommand "pipenv-purifier-test-conformance-relock"
       {
         nativeBuildInputs = [
           cli
-          withOverlay.pipenv
+          pkgs.pipenv
         ];
       }
       ''
@@ -263,33 +454,104 @@ in
         cmp "$TMPDIR/first.json" pipenv-purifier.lock.json
         # The lockfile is the committed one byte for byte, once each URL is
         # the committed URL of the same file: the local index serves the
-        # files under URLs of its own.
+        # files under URLs of its own, so the hashes of the lockfile's
+        # content and of Pipfile.lock differ too.
         ${pkgs.python3.interpreter} - ${./fixtures/simple/pipenv-purifier.lock.json} pipenv-purifier.lock.json <<'EOF'
         import json, sys
         committed_path, made_path = sys.argv[1:]
         committed = json.load(open(committed_path))
         made = json.load(open(made_path))
-        urls = {a["path"]: a["url"] for a in committed["artifacts"] if "url" in a}
-        for artifact in made["artifacts"]:
-            if artifact["path"] not in urls:
-                sys.exit(f"the lock run recorded {artifact['path']}, which the committed lockfile does not have")
-            artifact["url"] = urls[artifact["path"]]
+        if sorted(made["urls"]) != sorted(committed["urls"]):
+            sys.exit(f"the lock run recorded URLs of other files:\n{sorted(made['urls'])}\n{sorted(committed['urls'])}")
+        made["urls"] = committed["urls"]
         made["inputsHash"] = committed["inputsHash"]
+        made["contentHash"] = committed["contentHash"]
         if json.dumps(made, indent=2) + "\n" != open(committed_path).read():
             for key in committed:
                 if committed[key] != made.get(key):
                     print(f"{key} differs:\n{committed[key]}\n{made.get(key)}", file=sys.stderr)
             sys.exit(1)
         EOF
+        # --lockfile writes the lockfile outside the project.
+        pipenv-purifier lock --lockfile "$TMPDIR/outside.json"
+        cmp "$TMPDIR/first.json" "$TMPDIR/outside.json"
         touch $out
       '';
 
-  # `publish --dist` uploads the sdist and wheel Nix built to an index.
+  # `update six` on a copy of the simple fixture whose Pipfile allows any
+  # six, locked while the local index served only six 1.16.0. With six
+  # 1.17.0 on the index too, `update` re-resolves six to 1.17.0 and relocks,
+  # and both lockfiles then pass the check for a stale lockfile, in the
+  # command and in the Nix library.
+  conformance-update =
+    runCommand "pipenv-purifier-test-conformance-update"
+      {
+        nativeBuildInputs = [
+          cli
+          pkgs.pipenv
+          pkgs.nix
+        ];
+      }
+      ''
+        export HOME=$TMPDIR PIPENV_VENV_IN_PROJECT=1 PIPENV_YES=1 PIPENV_NOSPIN=1
+        export PIPENV_PYTHON=${pkgs.python3.interpreter}
+        export PIPENV_CACHE_DIR=$TMPDIR/pipenv-cache PIP_CACHE_DIR=$TMPDIR/pip-cache
+        export NIX_STATE_DIR=$TMPDIR/nix-state NIX_CONF_DIR=$TMPDIR
+        mkdir packages
+        cp ${simpleFiles}/* packages/
+        mv packages/six-1.17.0* "$TMPDIR/"
+        cp ${six16} packages/six-1.16.0-py2.py3-none-any.whl
+        ${startIndex "packages"}
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        cd project
+        sed -i 's|https://pypi.org/simple|http://127.0.0.1:8080/simple|; s|^six = "==1.17.0"$|six = "*"|' Pipfile
+        pipenv lock
+        rm -rf .venv
+        pipenv-purifier lock
+        grep -q '"version": "==1.16.0"' Pipfile.lock
+        mv "$TMPDIR"/six-1.17.0* ../packages/
+        pipenv-purifier update six
+        grep -q '"version": "==1.17.0"' Pipfile.lock
+        pipenv verify
+        pipenv-purifier prefetch --inputs ${simple.prefetch} --categories tools
+        nix-instantiate --eval --strict --store dummy:// \
+          --expr "(import ${../nix/lib}/lock.nix { src = $PWD; }).problems" > "$TMPDIR/problems"
+        cat "$TMPDIR/problems"
+        test "$(cat "$TMPDIR/problems")" = "[ ]"
+        touch $out
+      '';
+
+  # The sdist and wheel of a local package, built twice, are the same bytes.
+  conformance-rebuild = runCommand "pipenv-purifier-test-conformance-rebuild" { } ''
+    for file in simple-0.1.0.tar.gz simple-0.1.0-py3-none-any.whl; do
+      cmp ${simple.packages.simple}/$file ${simpleAgain}/$file
+    done
+    touch $out
+  '';
+
+  # The simple fixture builds from lockfiles kept outside its source, and
+  # `prefetch --lockfile` reads a lockfile outside the project.
+  conformance-external =
+    runCommand "pipenv-purifier-test-conformance-external" { nativeBuildInputs = [ cli ]; }
+      ''
+        test "$(${external.environment}/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        mv project/pipenv-purifier.lock.json lock.json
+        cd project
+        export HOME=$TMPDIR
+        pipenv-purifier prefetch --lockfile ../lock.json --inputs ${external.prefetch}
+        test "$(.venv/bin/simple)" = "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3"
+        touch $out
+      '';
+
+  # `publish --release` uploads the sdist and wheel Nix built to an index.
   publish = runCommand "pipenv-purifier-test-publish" { nativeBuildInputs = [ cli ]; } ''
     export HOME=$TMPDIR UV_CACHE_DIR=$TMPDIR/uv-cache
     mkdir packages
     ${startIndex "packages"}
-    pipenv-purifier publish --dist ${simple.packages.simple} -- \
+    pipenv-purifier publish --release ${simple.release} -- \
       --publish-url http://127.0.0.1:8080/ --username user --password password
     test -f packages/simple-0.1.0.tar.gz
     test -f packages/simple-0.1.0-py3-none-any.whl
@@ -340,7 +602,8 @@ in
   cli = runCommand "pipenv-purifier-test-cli" { } ''
     ${lib.getExe cli} --help
     ${lib.getExe cli} lock --help
-    ${lib.getExe cli} sync --help
+    ${lib.getExe cli} update --help
+    ${lib.getExe cli} prefetch --help
     ${lib.getExe cli} publish --help
     touch $out
   '';

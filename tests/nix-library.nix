@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Unit tests of the Nix library that need no build: wheel selection, name
-# normalization, and the check that pipenv-purifier.lock.json still matches
-# Pipfile.lock.
+# normalization, file names from URLs, and the reading of the committed
+# lockfiles. The conformance checks cover the lockfiles it refuses.
 {
   pkgs,
   # The shared purifier library, for its wheel selection.
@@ -49,7 +49,8 @@ let
     pythonTwoOnly = false;
   };
 
-  current = import ../nix/lib/lock.nix { src = ./fixtures/simple; };
+  simpleLock = import ../nix/lib/lock.nix { src = ./fixtures/simple; };
+  current = simpleLock.views;
 
   normalizeCases = {
     "Foo.Bar_baz" = "foo-bar-baz";
@@ -65,61 +66,29 @@ let
     "libs/greeting/" = "libs/greeting";
   };
 
-  # A Pipfile.lock that differs from the one pipenv-purifier.lock.json was
-  # made for: the lockfile must be refused.
-  changedPipfileLock = builtins.toFile "Pipfile.lock" (
-    builtins.replaceStrings [ "\"==0.6.2\"" ] [ "\"==0.6.1\"" ] (
-      builtins.readFile ./fixtures/simple/Pipfile.lock
-    )
-  );
-  staleLock =
-    builtins.tryEval
-      (import ../nix/lib/lock.nix {
-        src = ./fixtures/simple;
-        pipfileLockFile = changedPipfileLock;
-      }).purifier;
-  currentLock = builtins.tryEval current.purifier.version;
-
-  # Damaged copies of the simple fixture's pipenv-purifier.lock.json, each of
-  # which the library must refuse.
-  simpleLock = builtins.fromJSON (builtins.readFile ./fixtures/simple/pipenv-purifier.lock.json);
-  withLock =
-    name: lock:
-    builtins.tryEval
-      (import ../nix/lib/lock.nix {
-        src = ./fixtures/simple;
-        lockFile = builtins.toFile "${name}.json" (builtins.toJSON lock);
-      }).purifier;
-  damaged = {
-    # The attrs wheel with the hash of the docopt sdist.
-    tamperedHash = simpleLock // {
-      artifacts = map (
-        a:
-        if a.path == "attrs-25.3.0-py3-none-any.whl" then
-          a // { hash = "sha256-SbOoJSgL1ms6qDWF71nEqMgvLIpSLb51SovI0IyFxJE="; }
-        else
-          a
-      ) simpleLock.artifacts;
-    };
-    # No files of a package that Pipfile.lock pins.
-    missingPackage = simpleLock // {
-      packages = removeAttrs simpleLock.packages [ "attrs==25.3.0" ];
-    };
-    # A file the packages name, without its download entry.
-    missingArtifact = simpleLock // {
-      artifacts = lib.filter (a: a.path != "docopt-0.6.2.tar.gz") simpleLock.artifacts;
-    };
-    # A JSON file that is no lockfile of this format.
-    notALockfile = {
-      hello = "world";
-    };
-    otherVersion = simpleLock // {
-      version = 99;
-    };
+  # File names from URLs, as the lock tool reads them.
+  fileNameCases = {
+    "https://files.example/packages/ab/torch-2.0.0%2Bcpu-cp314-cp314-linux_x86_64.whl" =
+      "torch-2.0.0+cpu-cp314-cp314-linux_x86_64.whl";
+    "https://x.example/a/six-1.17.0.tar.gz?x=1#sha256=ab" = "six-1.17.0.tar.gz";
   };
-  acceptedDamage = lib.filter (name: (withLock name damaged.${name}).success) (lib.attrNames damaged);
-  # The undamaged copy is accepted, so the refusals above are of the damage.
-  undamaged = withLock "undamaged" simpleLock;
+
+  # The committed lockfile of every fixture passes checkLock of the shared
+  # purifier library, the shape and the problems both. The lock tool wrote
+  # it, so its contentHash is the hash the lock tool computes, and the
+  # library computes the same.
+  checks = lock: builtins.tryEval (builtins.deepSeq (purifier.checkLock lock).entries true);
+  currentLock = checks simpleLock;
+  sourcesLock = checks (import ../nix/lib/lock.nix { src = ./fixtures/sources; });
+  # A wheel for one platform carries the systems it installs on.
+  systemsOf =
+    name: (lib.findFirst (entry: entry.path == name) { } simpleLock.entries).systems or "everywhere";
+  systemCases = {
+    "attrs-25.3.0-py3-none-any.whl" = "everywhere";
+    "markupsafe-3.0.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl" =
+      [ "aarch64-linux" ];
+    "markupsafe-3.0.3-cp314-cp314-win_amd64.whl" = [ ];
+  };
 
   failures =
     lib.filter (name: wheelCases.${name} != wheelExpected.${name}) (lib.attrNames wheelCases)
@@ -129,10 +98,14 @@ let
     ++ lib.concatMap (
       path: lib.optional (current.normalizePath path != pathCases.${path}) "normalizePath ${path}"
     ) (lib.attrNames pathCases)
-    ++ lib.optional staleLock.success "a stale pipenv-purifier.lock.json was accepted"
-    ++ lib.optional (!currentLock.success) "the current pipenv-purifier.lock.json was refused"
-    ++ map (name: "the damaged lockfile ${name} was accepted") acceptedDamage
-    ++ lib.optional (!undamaged.success) "an undamaged copy of the lockfile was refused";
+    ++ lib.concatMap (
+      url: lib.optional (current.fileName url != fileNameCases.${url}) "fileName ${url}"
+    ) (lib.attrNames fileNameCases)
+    ++ lib.optional (!currentLock.success) "the simple fixture's pipenv-purifier.lock.json was refused"
+    ++ lib.optional (!sourcesLock.success) "the sources fixture's pipenv-purifier.lock.json was refused"
+    ++ lib.concatMap (name: lib.optional (systemsOf name != systemCases.${name}) "systems of ${name}") (
+      lib.attrNames systemCases
+    );
 in
 pkgs.runCommand "pipenv-purifier-test-nix-library" { } (
   if failures == [ ] then

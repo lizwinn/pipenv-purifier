@@ -237,6 +237,45 @@ class DamagedPipfileLock(unittest.TestCase):
         self.assertEqual(self.read('{"_meta": {}, "default": {}}'), {"_meta": {}, "default": {}})
 
 
+class ContentHash(unittest.TestCase):
+    def test_hash_leaves_out_its_own_field_and_key_order(self):
+        lock = {"version": 2, "urls": {"b": "https://x/é", "a": "https://y"}}
+        self.assertEqual(p.content_hash(lock), p.content_hash({"urls": {"a": "https://y", "b": "https://x/é"}, "version": 2, "contentHash": "old"}))
+
+    def test_hash_is_of_the_compact_json(self):
+        # builtins.toJSON writes {"a":[1,true,null]} for the same value.
+        self.assertEqual(p.content_hash({"a": [1, True, None]}), p.hashlib.sha256(b'{"a":[1,true,null]}').hexdigest())
+
+    def test_edited_lockfile_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "Pipfile.lock"), "w") as f:
+                f.write("{}")
+            lock = {"version": p.FORMAT_VERSION, "inputsHash": p.inputs_hash(root, {})}
+            lock["contentHash"] = p.content_hash(lock)
+            path = os.path.join(root, p.LOCK_FILE)
+            with open(path, "w") as f:
+                json.dump(lock, f)
+            p.check_purifier_lock(root, {}, path)
+            lock["inputsHash"] = "0" * 64
+            with open(path, "w") as f:
+                json.dump(lock, f)
+            with self.assertRaisesRegex(p.Error, "edited after `pipenv-purifier lock`"):
+                p.check_purifier_lock(root, {}, path)
+
+
+class Pins(unittest.TestCase):
+    def test_pins_of_one_version_constrain_build_requirements(self):
+        lock = {
+            "_meta": {},
+            "default": {"Filelock": {"version": "==4.2.4"}, "six": {"version": "==1.17.0"}, "app": {"path": "."}},
+            "develop": {"six": {"version": "==1.16.0"}},
+        }
+        keys, pinned = p.pipfile_lock_pins(lock)
+        self.assertEqual(keys, {"filelock==4.2.4", "six==1.17.0", "six==1.16.0"})
+        # six is pinned at two versions, so no single pin constrains it.
+        self.assertEqual(pinned, {"filelock": "4.2.4"})
+
+
 class InputsHash(unittest.TestCase):
     def test_hash_covers_local_pyprojects_inside_the_project(self):
         with tempfile.TemporaryDirectory() as root:

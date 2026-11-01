@@ -12,30 +12,42 @@
 # links them into one directory, the wheelhouse, and runs Pipenv with pip
 # reading the wheelhouse and nothing else.
 #
-# The result has:
+# The result has the attributes of the purifier contract:
+# - `packages.<name>`: for each local package of the project, its sdist and
+#   wheel. Its `artifacts` name each file, as the lockfile records them,
+#   without building.
+# - `tests`: the Pipfile's script `testScript`, run in the sandbox in an
+#   environment of `testCategories`.
+# - `release`: the sdists and wheels of every local package in one
+#   directory, which is what `pipenv-purifier publish` uploads.
+# - `fetches`: the `entries` of the lock in memory (nix/lib/lock.nix), the
+#   download entries of the shared purifier library, each wheel for some
+#   systems only with its `systems`.
+# It also has:
 # - `environment`: a virtual environment with the packages of `categories`
 #   installed by `pipenv sync`, with their scripts in `bin/`.
-# - `packages.<name>`: for each local package of the project, its sdist and
-#   wheel, which is what `pipenv-purifier publish` uploads. Its `artifacts`
-#   name each file, as the lockfile records them, without building.
 # - `programs.<script>`: each script of the local packages, from
 #   `environment`, as a package that `nix run` runs.
+# - `prefetch`: what `pipenv-purifier prefetch` installs the project's .venv
+#   from.
 {
   lib,
-  pkgs,
-  stdenvNoCC,
-  linkFarm,
-  runCommand,
-  writeText,
-  pipenv,
-  glibc,
   # The shared purifier library, `lib.purifier` of its flake.
   purifier,
 }:
 {
-  # The project root, which holds the Pipfile, Pipfile.lock and
-  # pipenv-purifier.lock.json.
+  pkgs,
+  # The project root, which holds the Pipfile.
   src,
+  # Replacements for the fetchers of nixpkgs, which the shared purifier
+  # library's fetchEntry takes, such as a `fetchurl` that sends credentials
+  # or reads a company mirror.
+  fetchers ? { },
+  # The lockfile that `pipenv-purifier lock` wrote. It may lie outside
+  # `src`, as in a flake that packages a project without changing it.
+  lockFile ? src + "/pipenv-purifier.lock.json",
+  # Pipfile.lock, for a `src` that holds none.
+  pipfileLock ? src + "/Pipfile.lock",
   # The Python the project builds and runs with. The default is nixpkgs'
   # pythonXY for the `python_version` of the Pipfile's [requires], or
   # python3 when the Pipfile names none.
@@ -43,10 +55,10 @@
   # The package categories `environment` installs, as `pipenv sync
   # --categories`.
   categories ? [ "default" ],
-  lockFile ? src + "/pipenv-purifier.lock.json",
-  # A replacement for nixpkgs' fetchurl, for the locked files, as the shared
-  # purifier library's fetchEntry takes it: for credentials or mirrors.
-  fetchurl ? null,
+  # The script of the Pipfile's [scripts] that `tests` runs, and the package
+  # categories it runs with.
+  testScript ? "test",
+  testCategories ? null,
   # The local packages that Pipfile.lock names by a path outside `src`, such
   # as "../shared", each mapped to a Nix path that holds it. A path inside
   # `src` is read from `src`.
@@ -61,12 +73,31 @@ let
     listToAttrs
     map
     ;
+  inherit (pkgs)
+    stdenvNoCC
+    linkFarm
+    runCommand
+    writeText
+    pipenv
+    glibc
+    ;
 
-  lock = import ./lock.nix { inherit src lockFile; };
-  # A download entry of the lockfile to its store path.
-  fetch = purifier.fetchEntry (
-    { inherit pkgs; } // lib.optionalAttrs (fetchurl != null) { inherit fetchurl; }
+  # The lock in memory, which checkLock refuses with its problems.
+  read = purifier.checkLock (
+    import ./lock.nix {
+      inherit src lockFile pipfileLock;
+    }
   );
+  lock = read.views;
+  # The paths of the entries that this system needs.
+  forSystem = listToAttrs (
+    map (entry: {
+      name = entry.path;
+      value = null;
+    }) (purifier.entriesFor stdenvNoCC.hostPlatform.system read)
+  );
+  # A download entry of the lockfile to its store path.
+  fetch = purifier.fetchEntry ({ inherit pkgs; } // fetchers);
 
   pythonAttribute =
     if lock.pythonVersion == null then
@@ -99,7 +130,7 @@ let
       locked =
         lock.packages.${key}
           or (throw "pipenv-purifier: pipenv-purifier.lock.json has no files of ${key}. Run `pipenv-purifier lock`.");
-      wheels = filter installs locked.wheels;
+      wheels = filter (wheel: forSystem ? ${wheel} && installs wheel) locked.wheels;
     in
     if wheels != [ ] then
       {
@@ -141,9 +172,9 @@ let
       operator = item: map (key: { inherit key; }) (concatMap (n: n.builds) (requirementNeeds item.key));
     });
 
-  # The locked files that installing the packages of some categories needs,
-  # as a wheelhouse.
-  wheelhouseFor =
+  # The download entries of the locked files that installing the packages of
+  # some categories needs.
+  filesFor =
     selected:
     let
       chosen = concatMap lock.packagesOf selected;
@@ -159,19 +190,21 @@ let
         ++ concatMap (key: concatMap (n: n.files) (requirementNeeds key)) builds
       );
     in
+    map (
+      name:
+      lock.files.${name}
+        or (throw "pipenv-purifier: pipenv-purifier.lock.json has no URL of ${name}. Run `pipenv-purifier lock`.")
+    ) fileNames;
+
+  # The locked files that installing the packages of some categories needs,
+  # as a wheelhouse.
+  wheelhouseFor =
+    selected:
     linkFarm "pipenv-purifier-wheelhouse" (
-      map (
-        name:
-        let
-          file =
-            lock.files.${name}
-              or (throw "pipenv-purifier: pipenv-purifier.lock.json has no URL of ${name}. Run `pipenv-purifier lock`.");
-        in
-        {
-          inherit name;
-          path = fetch file;
-        }
-      ) fileNames
+      map (file: {
+        name = file.path;
+        path = fetch file;
+      }) (filesFor selected)
     );
 
   lockedSource =
@@ -356,27 +389,67 @@ let
     export HOME=$TMPDIR PIP_CACHE_DIR=$TMPDIR/pip-cache PIPENV_CACHE_DIR=$TMPDIR/pipenv-cache
   '';
 
-  environment = stdenvNoCC.mkDerivation {
-    pname = "pipenv-environment";
+  environmentOf =
+    selected:
+    stdenvNoCC.mkDerivation {
+      pname = "pipenv-environment";
+      version = "0";
+      inherit src;
+      nativeBuildInputs = [ pipenv ];
+      env = pipEnv (wheelhouseFor selected);
+      dontConfigure = true;
+      buildPhase = ''
+        runHook preBuild
+        ${pipSetup}
+        mkdir "$TMPDIR/pipfile"
+        cp Pipfile "$TMPDIR/pipfile/Pipfile"
+        sed "s|@source@|$PWD|g" ${rewrittenLock} > "$TMPDIR/pipfile/Pipfile.lock"
+        ${substituteGitWheels}
+        ${copyOutsidePaths}
+        ${interpreter.interpreter} -m venv "$out"
+        VIRTUAL_ENV="$out" PIPENV_PIPFILE="$TMPDIR/pipfile/Pipfile" \
+          pipenv sync --categories ${lib.escapeShellArg (lib.concatStringsSep " " selected)}
+        runHook postBuild
+      '';
+      dontInstall = true;
+    };
+  environment = environmentOf categories;
+
+  # The Pipfile's script `testScript`, which `pipenv run <testScript>` runs.
+  # Pipenv runs a script as a command line, and so does the shell here.
+  pipfile = builtins.fromTOML (builtins.readFile (src + "/Pipfile"));
+  testCommand =
+    let
+      script =
+        pipfile.scripts.${testScript}
+          or (throw "pipenv-purifier: the Pipfile has no script `${testScript}` for `tests` to run. Add it under [scripts], or pass `testScript`.");
+    in
+    if builtins.isString script then
+      script
+    else
+      throw "pipenv-purifier: the Pipfile's script `${testScript}` is a table; `tests` runs a script that is a command line.";
+
+  # The tests run in a writable copy of the environment, as they run in a
+  # project's .venv, because some tools write caches into the environment.
+  # A virtual environment finds its packages from the directory of its
+  # pyvenv.cfg.
+  tests = stdenvNoCC.mkDerivation {
+    pname = "pipenv-tests";
     version = "0";
     inherit src;
-    nativeBuildInputs = [ pipenv ];
-    env = pipEnv (wheelhouseFor categories);
     dontConfigure = true;
     buildPhase = ''
       runHook preBuild
-      ${pipSetup}
-      mkdir "$TMPDIR/pipfile"
-      cp Pipfile "$TMPDIR/pipfile/Pipfile"
-      sed "s|@source@|$PWD|g" ${rewrittenLock} > "$TMPDIR/pipfile/Pipfile.lock"
-      ${substituteGitWheels}
-      ${copyOutsidePaths}
-      ${interpreter.interpreter} -m venv "$out"
-      VIRTUAL_ENV="$out" PIPENV_PIPFILE="$TMPDIR/pipfile/Pipfile" \
-        pipenv sync --categories ${lib.escapeShellArg (lib.concatStringsSep " " categories)}
+      export HOME=$TMPDIR
+      cp -r ${
+        environmentOf (if testCategories == null then lock.categories else testCategories)
+      } "$TMPDIR/venv"
+      chmod -R u+w "$TMPDIR/venv"
+      export VIRTUAL_ENV=$TMPDIR/venv PATH=$TMPDIR/venv/bin:$PATH
+      ${testCommand}
       runHook postBuild
     '';
-    dontInstall = true;
+    installPhase = "touch $out";
   };
 
   # A Python with `build`, the frontend that makes a local package's sdist
@@ -443,10 +516,20 @@ let
     ) (lib.attrValues lock.outputs)
   );
 
-  # What `pipenv-purifier sync` installs a development environment from:
-  # the Python of the build, the wheelhouse of every category, and what the
-  # installs read for the packages from git and URLs.
-  interactive = runCommand "pipenv-purifier-interactive" { } ''
+  release = runCommand "pipenv-purifier-release" { } ''
+    mkdir $out
+    ${lib.concatMapStrings (package: ''
+      ln -s ${package}/* $out/
+    '') (lib.attrValues packages)}
+  '';
+
+  # Every download of the lock, each with the systems it is needed on.
+  fetches = read.entries;
+
+  # What `pipenv-purifier prefetch` installs a development environment
+  # from: the Python of the build, the wheelhouse of every category, and
+  # what the installs read for the packages from git and URLs.
+  prefetch = runCommand "pipenv-purifier-prefetch" { } ''
     mkdir $out
     ln -s ${interpreter.interpreter} $out/python
     ln -s ${wheelhouseFor lock.categories} $out/wheelhouse
@@ -455,11 +538,12 @@ let
 in
 {
   inherit
-    lock
-    environment
     packages
+    tests
+    release
+    fetches
+    environment
     programs
-    interactive
+    prefetch
     ;
-  python = interpreter;
 }

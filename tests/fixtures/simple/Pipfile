@@ -18,3 +18,7 @@ iniconfig = "==2.1.0"
 
 [requires]
 python_version = "3.14"
+
+# `pipenv run test`, which the builder's `tests` runs in the sandbox.
+[scripts]
+test = "python -m unittest discover -s tests -v"

@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: MIT
 #
-# What the `pipenv-purifier` command builds for a project directory given as
-# an absolute path, with the nixpkgs the command was built with:
-# - `interactive`: the inputs of a development environment, which `sync`
-#   installs into the project's .venv;
-# - `package`: the sdist and wheel of the local package `package`, which
-#   `publish` uploads.
+# What the `pipenv-purifier` command builds for a project directory and a
+# lockfile, both given as absolute paths, with the nixpkgs the command was
+# built with: the `prefetch` or the `release` of buildPipenvProject.
 #
 # A local package that Pipfile.lock names by a path outside the project is
 # read from that path.
@@ -14,8 +11,8 @@
   # The source of the shared purifier library.
   purifier,
   src,
+  lockFile,
   attribute,
-  package ? null,
 }:
 let
   pkgs = import nixpkgs { };
@@ -58,18 +55,23 @@ let
     if lib.pathIsDirectory target then source target else target
   );
 
-  project =
-    pkgs.callPackage ./build-pipenv-project.nix
-      { purifier = import "${purifier}/nix/lib" { inherit lib; }; }
-      {
-        src = source root;
-        inherit pathSources;
-      };
+  buildPipenvProject = import ./build-pipenv-project.nix {
+    inherit lib;
+    purifier = import "${purifier}/nix/lib" { inherit lib; };
+  };
+  project = buildPipenvProject {
+    inherit pkgs pathSources;
+    src = source root;
+    lockFile = /. + lockFile;
+    pipfileLock = root + "/Pipfile.lock";
+  };
 in
-if attribute == "interactive" then
-  project.interactive
-else if attribute == "package" then
-  project.packages.${package}
-    or (throw "pipenv-purifier: ${package} is no local package; the local packages are ${toString (builtins.attrNames project.packages)}")
+if
+  builtins.elem attribute [
+    "prefetch"
+    "release"
+  ]
+then
+  project.${attribute}
 else
-  throw "pipenv-purifier: cli.nix builds `interactive` or `package`, not ${attribute}"
+  throw "pipenv-purifier: cli.nix builds `prefetch` or `release`, not ${attribute}"

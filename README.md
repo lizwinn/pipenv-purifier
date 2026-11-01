@@ -143,6 +143,14 @@ every package with `pipenv lock`, or `pipenv-purifier update <package>...`,
 which re-resolves the named ones with `pipenv upgrade`. It then relocks
 `pipenv-purifier.lock.json` against the new Pipfile.lock.
 
+To publish, run `pipenv-purifier publish -- <arguments of uv publish>`.
+Nix builds the `release`, the sdists and wheels of the local packages, and
+`uv publish` uploads them, because Pipenv has no upload command of its own.
+`--release <path>` uploads a release that Nix built before.
+
+Pipenv has no plugin mechanism, so `pipenv-purifier` is a command of its own
+that runs Pipenv, rather than a plugin that Pipenv loads.
+
 `pipenv-purifier lock` keeps Pipfile.lock as Pipenv resolved it. When
 Pipfile.lock is missing or no longer matches the Pipfile, `lock` writes it
 with `pipenv lock` first. It looks up the URL of every hash of Pipfile.lock
@@ -176,8 +184,10 @@ network.
 An editor for Python needs the interpreter of the `.venv`, with the
 project's packages in it. Point the editor's Python at `.venv/bin/python`,
 or let it find `.venv` in the project, as Pyright and the Python extension
-of VS Code do. The language server itself comes from the editor's
-installation.
+of VS Code do. A Python editor reads the project's packages from the
+`.venv`, which `prefetch` installs, and asks for no downloads of its own,
+so `prefetch` fetches nothing for the editor beyond the `.venv`. The
+language server comes from the editor's installation.
 
 ## Troubleshooting
 

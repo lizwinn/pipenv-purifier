@@ -1,0 +1,49 @@
+{
+    "_meta": {
+        "hash": {
+            "sha256": "790fe0004d951aa6b3df37f079aae1747c86bfcb7acb76e143a7e299d4e12176"
+        },
+        "pipfile-spec": 6,
+        "requires": {
+            "python_version": "3.14"
+        },
+        "sources": [
+            {
+                "name": "pypi",
+                "url": "https://pypi.org/simple",
+                "verify_ssl": true
+            }
+        ]
+    },
+    "default": {
+        "attrs": {
+            "git": "https://github.com/python-attrs/attrs",
+            "markers": "python_version >= '3.9'",
+            "ref": "3dca08ce5bbe673d7df25f44f3dda92505d1043d"
+        },
+        "localdir": {
+            "path": "vendor/localdir"
+        },
+        "localsdist": {
+            "hashes": [
+                "sha256:b8e0eede401b6973054a8ea6b4a6d3ed1e432bb4b914d1382f14325c04a4542f"
+            ],
+            "path": "vendor/localsdist-0.4.0.tar.gz"
+        },
+        "localwheel": {
+            "hashes": [
+                "sha256:8406d6ab7481dbe9a2be95a9c7acb778b6c4d031ce07499cf5812b7d2f0337cc"
+            ],
+            "path": "vendor/localwheel-0.5.0-py3-none-any.whl"
+        },
+        "six": {
+            "file": "https://github.com/benjaminp/six/archive/refs/tags/1.17.0.tar.gz",
+            "markers": "python_version >= '2.7' and python_version not in '3.0, 3.1, 3.2'"
+        },
+        "sources": {
+            "editable": true,
+            "path": "."
+        }
+    },
+    "develop": {}
+}

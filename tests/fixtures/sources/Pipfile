@@ -1,0 +1,23 @@
+# Every kind of source Pipfile.lock records besides an index:
+# - attrs from git, at a tag. It builds with hatch-vcs, which reads its
+#   version from git.
+# - six from a URL, a GitHub archive whose file name is not an sdist name.
+# - localdir from a local directory.
+# - localsdist from a local sdist file.
+# - localwheel from a local wheel file.
+# - the project itself, as an editable local package.
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+attrs = { git = "https://github.com/python-attrs/attrs", ref = "25.3.0" }
+six = { file = "https://github.com/benjaminp/six/archive/refs/tags/1.17.0.tar.gz" }
+localdir = { path = "vendor/localdir" }
+localsdist = { path = "vendor/localsdist-0.4.0.tar.gz" }
+localwheel = { path = "vendor/localwheel-0.5.0-py3-none-any.whl" }
+sources = { path = ".", editable = true }
+
+[requires]
+python_version = "3.14"

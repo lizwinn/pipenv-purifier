@@ -1,0 +1,14 @@
+# A project that depends on a package outside its own directory, as an
+# editable path. The Nix build takes `src = ./app` and gets ../shared
+# through `pathSources`.
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+shared = { path = "../shared", editable = true }
+outside-app = { path = ".", editable = true }
+
+[requires]
+python_version = "3.14"

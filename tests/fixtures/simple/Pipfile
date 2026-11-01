@@ -1,0 +1,20 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+attrs = "==25.3.0"
+docopt = "==0.6.2"
+markupsafe = "==3.0.3"
+simple = { path = ".", editable = true }
+
+[dev-packages]
+six = "==1.17.0"
+
+# A custom category, which `pipenv sync --categories tools` installs.
+[tools]
+iniconfig = "==2.1.0"
+
+[requires]
+python_version = "3.14"

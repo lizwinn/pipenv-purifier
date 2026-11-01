@@ -1,0 +1,29 @@
+{
+    "_meta": {
+        "hash": {
+            "sha256": "e62e4ddf18673971042a0095ce2dbc5feb8dc5f3d12f31f68986945e67177737"
+        },
+        "pipfile-spec": 6,
+        "requires": {
+            "python_version": "3.14"
+        },
+        "sources": [
+            {
+                "name": "pypi",
+                "url": "https://pypi.org/simple",
+                "verify_ssl": true
+            }
+        ]
+    },
+    "default": {
+        "outside-app": {
+            "editable": true,
+            "path": "."
+        },
+        "shared": {
+            "editable": true,
+            "path": "../shared"
+        }
+    },
+    "develop": {}
+}

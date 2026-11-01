@@ -383,8 +383,15 @@ let
     # in, which is what the build asks of it.
     PIPENV_VERBOSITY = "-1";
   };
+  # The setup hook of nixpkgs' Python puts the site-packages of Python
+  # packages among the build inputs, such as Pipenv's own dependencies, on
+  # PYTHONPATH. pip would take a package there as installed and leave the
+  # locked one out of the environment, and an isolated build would import
+  # it ahead of the locked build requirements. Pipenv's wrapper sets the
+  # path that Pipenv itself needs.
   pipSetup = ''
     export HOME=$TMPDIR PIP_CACHE_DIR=$TMPDIR/pip-cache PIPENV_CACHE_DIR=$TMPDIR/pipenv-cache
+    unset PYTHONPATH
   '';
 
   environmentOf =
@@ -438,7 +445,7 @@ let
     dontConfigure = true;
     buildPhase = ''
       runHook preBuild
-      export HOME=$TMPDIR
+      ${pipSetup}
       cp -r ${
         environmentOf (if testCategories == null then lock.categories else testCategories)
       } "$TMPDIR/venv"

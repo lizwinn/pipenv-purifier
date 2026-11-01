@@ -64,7 +64,9 @@ derived shapes from the result's `views`.
 
 ## The lock run
 
-1. `pipenv verify` checks that Pipfile.lock matches the Pipfile.
+1. `pipenv verify` checks that Pipfile.lock matches the Pipfile. When
+   Pipfile.lock is missing or does not match, `pipenv lock` writes it, and
+   otherwise Pipfile.lock stays as it is.
 2. For each package of an index, the tool reads the package's page on its
    index, as JSON (PEP 691) or HTML (PEP 503), and records the URLs of the
    files whose SHA-256 Pipfile.lock lists. The URLs carry no credentials.
@@ -116,6 +118,17 @@ the distribution's name, so the variable has to apply to that build alone.
 A local package's sdist and wheel come from `python -m build`, which builds
 in an isolated environment that pip fills from the wheelhouse. The build
 checks that it made the files the lockfile names.
+
+## PYTHONPATH
+
+The setup hook of nixpkgs' Python puts the site-packages of the Python
+packages among the build inputs on PYTHONPATH, and Pipenv is one of those
+inputs. pip takes a package on PYTHONPATH as installed, so it would leave
+the locked copy out of the environment, and an isolated build would import
+it ahead of the locked build requirements. Every build of the builder
+unsets PYTHONPATH after its `preBuild` hook, and `prefetch` leaves it out
+of the environment of `pipenv sync`. Pipenv's wrapper sets the path that
+Pipenv itself needs.
 
 ## The commands
 

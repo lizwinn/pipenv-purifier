@@ -19,9 +19,11 @@ The conformance checks of the purifier contract:
   requirements need.
 - `conformance-malformed` writes a file that is not JSON, JSON that is no
   lockfile, and another format version.
-- `conformance-relock` runs `pipenv lock` and `pipenv-purifier lock` on a
-  copy of the simple fixture against a local index that serves its locked
-  files. A second lock run writes the same bytes, `--lockfile` writes the
+- `conformance-relock` runs `pipenv-purifier lock` on a copy of the simple
+  fixture against a local index that serves its locked files. The copy
+  reads another index, so its Pipfile no longer matches Pipfile.lock, and
+  `lock` writes Pipfile.lock with `pipenv lock`. A second lock run keeps
+  Pipfile.lock as it is and writes the same lockfile, `--lockfile` writes the
   same bytes elsewhere, and the lockfile is the committed one byte for byte
   once the URLs and the two hashes that depend on them are the committed
   ones.
@@ -70,6 +72,11 @@ The other checks:
   tests. It leaves out `tests/unit/test_release_tasks.py`, which imports
   bs4, a package that Pipenv's Pipfile does not list, and four tests that
   download from PyPI.
+- `environment-pythonpath` builds the simple environment with a fake
+  attrs 25.3.0 on PYTHONPATH, and `tests/locked-in-venv.py` checks that
+  every locked package is inside the environment at its locked version.
+  `real-world-pipenv-locked` runs the same script on the environment of
+  Pipenv's repository.
 - `nix-library` tests wheel selection, name and path normalization, file
   names from URLs, the `systems` of wheels, and `checkLock` of the shared
   library on the committed lockfiles.

@@ -644,17 +644,20 @@ def content_hash(lockfile):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def check_pipfile_lock(root):
-    """Pipfile.lock exists and matches the Pipfile."""
-    pipfile_lock = read_pipfile_lock(root)
-    with open(os.path.join(root, "Pipfile"), "rb") as f:
-        pipfile = tomllib.load(f)
+def ensure_pipfile_lock(root, python):
+    """Pipfile.lock as Pipenv resolved it. A Pipfile.lock that matches the
+    Pipfile stays as it is. When it is missing or no longer matches the
+    Pipfile, as after adding a package to the Pipfile by hand, `pipenv lock`
+    writes it."""
+    path = os.path.join(root, "Pipfile.lock")
     # Pipenv's own check: the hash in _meta is the hash of the Pipfile's
     # content, which `pipenv verify` compares.
-    result = run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=sys.executable))
-    if result.returncode != 0:
-        raise Error("Pipfile.lock does not match the Pipfile; run `pipenv lock` first\n" + (result.stderr or result.stdout).strip())
-    return pipfile_lock, pipfile
+    if not os.path.exists(path) or run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python)).returncode != 0:
+        log("Pipfile.lock is missing or does not match the Pipfile; writing it with `pipenv lock`")
+        result = subprocess.run(["pipenv", "lock"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
+        if result.returncode != 0:
+            raise Error("`pipenv lock` failed; its error above says why")
+    return read_pipfile_lock(root)
 
 
 def pipfile_lock_pins(pipfile_lock):
@@ -687,7 +690,7 @@ def lock(root, python, lock_path):
       its scripts, which Nix knows without building.
     - `inputsHash` and `contentHash`, which tell a stale lockfile and an
       edited one."""
-    pipfile_lock, _ = check_pipfile_lock(root)
+    pipfile_lock = ensure_pipfile_lock(root, python)
     locked_keys, pinned = pipfile_lock_pins(pipfile_lock)
 
     urls = {}
@@ -933,9 +936,12 @@ def nix_build(root, attribute, lock_path, out_link=None):
 
 def offline_env(inputs):
     """The environment in which Pipenv installs from the locked files Nix
-    fetched and nothing else."""
+    fetched and nothing else. A PYTHONPATH of the shell, as a Nix shell
+    with Python packages sets one, is left out, because pip would take a
+    package there as installed and leave the locked one out of .venv."""
+    environment = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     return dict(
-        os.environ,
+        environment,
         PIP_NO_INDEX="1",
         PIP_FIND_LINKS=os.path.join(inputs, "wheelhouse"),
         PIP_DISABLE_PIP_VERSION_CHECK="1",

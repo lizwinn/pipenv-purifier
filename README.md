@@ -19,8 +19,8 @@ family and meets the family's
 
 ## Quickstart
 
-From the directory that holds the Pipfile, with a Pipfile.lock that matches
-it:
+A project starts with three commands, which run in the directory that holds
+the Pipfile.
 
 ```zsh
 nix run github:nix-purifiers/pipenv-purifier -- lock
@@ -28,9 +28,11 @@ nix run github:nix-purifiers/pipenv-purifier -- prefetch
 pipenv run pytest
 ```
 
-`lock` writes `pipenv-purifier.lock.json`, which you commit. `prefetch` has
-Nix fetch everything the project needs on this machine and installs the
-project's `.venv` from it, offline. Then the everyday Pipenv commands work.
+`lock` writes `pipenv-purifier.lock.json`. It also writes Pipfile.lock when
+the project has none, and you commit both files. `prefetch` has Nix fetch
+everything the project needs on this machine, and it installs the
+project's `.venv` from those files, offline. After that, the everyday
+Pipenv commands work.
 
 To build the project with Nix, a flake calls the builder of this flake's
 library:
@@ -130,8 +132,10 @@ which re-resolves the named ones with `pipenv upgrade`. It then relocks
 `pipenv-purifier.lock.json` against the new Pipfile.lock. `lock` keeps
 Pipfile.lock as it is.
 
-`pipenv-purifier lock` looks up the URL of every hash of Pipfile.lock on the
-package's index, for every platform. It reads the build requirements of
+`pipenv-purifier lock` keeps Pipfile.lock as Pipenv resolved it. When
+Pipfile.lock is missing or no longer matches the Pipfile, `lock` writes it
+with `pipenv lock` first. It looks up the URL of every hash of Pipfile.lock
+on the package's index, for every platform. It reads the build requirements of
 each package that may have to be built through the build backend's PEP 517
 hooks, and resolves each set with `pipenv lock` on a throwaway Pipfile, at
 the versions Pipfile.lock pins wherever the set allows them. It fetches each
@@ -169,7 +173,7 @@ installation, not from the project's lockfiles.
 
 | Error | Fix |
 | --- | --- |
-| `Pipfile.lock does not match the Pipfile` | Run `pipenv lock`, then `pipenv-purifier lock`. |
+| `Pipfile.lock does not match the Pipfile`, from `prefetch` | Run `pipenv-purifier lock`, which runs `pipenv lock` first. |
 | `pipenv-purifier.lock.json no longer matches Pipfile.lock` | Run `pipenv-purifier lock`. This follows a `pipenv install`. |
 | `... was edited after pipenv-purifier lock wrote it` | Run `pipenv-purifier lock`. The lockfile's `contentHash` no longer matches its content. |
 | `... does not agree with Pipfile.lock: it has no files of <package>` | Run `pipenv-purifier lock`. |
@@ -208,15 +212,16 @@ wheelhouse. Its markers leave it out on that system when it is a package
 for another platform. When its markers do include it, pip fails on the
 missing file.
 
-## Real-world projects
+## Examples
 
-| Project | What was tried | Result |
-| --- | --- | --- |
-| [pypa/pipenv](https://github.com/pypa/pipenv) at `fef0293` | `lock`, `prefetch`, `pipenv run pytest`, the Nix build of the `default` and `develop` categories with the unit tests, `pipenv install rich`, relock | `lock` takes about 70 s for 91 packages and 7 sets of build requirements. `prefetch` takes about 20 s with the store filled. In the Nix sandbox, 1853 of Pipenv's unit tests pass, 10 are skipped, and 8 that need PyPI or bs4 are left out. |
-
-The check `real-world-pipenv` builds Pipenv's repository from the committed
-lockfile in `tests/real-world/pipenv/` and runs its unit tests, in CI on
-both systems.
+CI locks and builds the repository of
+[Pipenv](https://github.com/pypa/pipenv) itself at commit `fef0293`, whose
+Pipfile.lock pins 91 packages. The check `real-world-pipenv` builds its
+`default` and `develop` categories from the lockfile in
+`tests/real-world/pipenv/` and runs its unit tests in the sandbox, on
+x86_64-linux and aarch64-linux. On a workstation, `lock` of that repository
+takes about 70 s, and `prefetch` takes about 20 s once the store holds its
+files.
 
 ## Credits
 

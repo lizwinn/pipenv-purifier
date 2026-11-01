@@ -439,9 +439,15 @@ in
         chmod -R u+w project
         cd project
         sed -i 's|https://pypi.org/simple|http://127.0.0.1:8080/simple|' Pipfile
-        pipenv lock
+        # The Pipfile no longer matches Pipfile.lock, so `pipenv-purifier
+        # lock` writes Pipfile.lock with `pipenv lock` first.
+        pipenv-purifier lock
+        pipenv verify
+        cp Pipfile.lock "$TMPDIR/Pipfile.lock"
         rm -rf .venv
         pipenv-purifier lock
+        # A Pipfile.lock that matches the Pipfile stays as it is.
+        cmp "$TMPDIR/Pipfile.lock" Pipfile.lock
         cp pipenv-purifier.lock.json "$TMPDIR/first.json"
         # A second lock run makes the same bytes.
         pipenv-purifier lock
@@ -515,6 +521,37 @@ in
         test "$(cat "$TMPDIR/problems")" = "[ ]"
         touch $out
       '';
+
+  # A build of the simple environment with a PYTHONPATH, as the setup hook
+  # of nixpkgs' Python sets one, that holds a fake attrs at the locked
+  # version. The environment still installs every locked package inside
+  # itself, at its locked version, because the build ignores PYTHONPATH.
+  environment-pythonpath =
+    let
+      fakeAttrs = runCommand "fake-attrs" { } ''
+        mkdir -p $out/attrs $out/attrs-25.3.0.dist-info
+        echo 'raise ImportError("the fake attrs on PYTHONPATH")' > $out/attrs/__init__.py
+        printf 'Metadata-Version: 2.1\nName: attrs\nVersion: 25.3.0\n' > $out/attrs-25.3.0.dist-info/METADATA
+        touch $out/attrs-25.3.0.dist-info/RECORD
+      '';
+      environment = simpleDevelop.environment.overrideAttrs (old: {
+        preBuild = (old.preBuild or "") + ''
+          export PYTHONPATH=${fakeAttrs}''${PYTHONPATH:+:$PYTHONPATH}
+        '';
+      });
+    in
+    runCommand "pipenv-purifier-test-environment-pythonpath" { } ''
+      ${environment}/bin/python -I ${./locked-in-venv.py} ${./fixtures/simple/Pipfile.lock} default develop
+      ${environment}/bin/simple
+      touch $out
+    '';
+
+  # Every locked package of Pipenv's repository is inside its environment,
+  # at its locked version.
+  real-world-pipenv-locked = runCommand "pipenv-purifier-test-real-world-pipenv-locked" { } ''
+    ${realWorldPipenv.environment}/bin/python -I ${./locked-in-venv.py} ${realWorldPipenvSource}/Pipfile.lock default develop
+    touch $out
+  '';
 
   # The sdist and wheel of a local package, built twice, are the same bytes.
   conformance-rebuild = runCommand "pipenv-purifier-test-conformance-rebuild" { } ''

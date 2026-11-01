@@ -181,6 +181,17 @@ class Outputs(unittest.TestCase):
             self.assertEqual(p.wheel_scripts(wheel), [])
 
 
+class OfflineEnvironment(unittest.TestCase):
+    def test_pythonpath_is_left_out(self):
+        os.environ["PYTHONPATH"] = "/nix/store/x-python3.14-platformdirs/lib/python3.14/site-packages"
+        try:
+            env = p.offline_env("/inputs")
+        finally:
+            del os.environ["PYTHONPATH"]
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertEqual(env["PIP_FIND_LINKS"], "/inputs/wheelhouse")
+
+
 class Retries(unittest.TestCase):
     def test_retries_a_broken_download(self):
         calls = []

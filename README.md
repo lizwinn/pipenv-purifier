@@ -33,9 +33,36 @@ everything the project needs on this machine, and it installs the
 project's `.venv` from those files, offline. After that, the usual Pipenv
 commands work.
 
-To build the project with Nix, a flake applies this flake's
-`overlays.default`, which adds the scope `pipenv-purifier` to the package
-set. The scope holds the builder `buildPipenvProject` and the command:
+After `lock`, Nix builds the project from the same directory, with no Nix
+file added to the project. This command builds the sdist and wheel of the
+local package `app`:
+
+```zsh
+nix build --impure --expr '
+  let
+    purifier = builtins.getFlake "github:nix-purifiers/pipenv-purifier";
+    pkgs = import purifier.inputs.nixpkgs {
+      system = builtins.currentSystem;
+      overlays = [ purifier.overlays.default ];
+    };
+  in
+  (pkgs.pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app'
+```
+
+This uses the purifier's pinned nixpkgs, matching the lock command above.
+To build with ambient `<nixpkgs>` from your Nix search path instead,
+replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
+Both forms need no Nix files in your project. The build tool and language
+versions must match the lockfile; with ambient nixpkgs, lock with the
+purifier from that package set or pass a compatible toolchain to the builder.
+
+The expression applies this flake's `overlays.default`, which adds the
+scope `pipenv-purifier` to the package set. The scope holds the builder
+`buildPipenvProject` and the command.
+
+A project whose authors want a flake that packages it can add one, in the
+project's repository or in another one. The flake calls the builder
+directly:
 
 ```nix
 {
@@ -65,14 +92,6 @@ set. The scope holds the builder `buildPipenvProject` and the command:
       };
     };
 }
-```
-
-A package in an overlay takes the scope by name:
-
-```nix
-# package.nix
-{ pipenv-purifier }:
-(pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app
 ```
 
 `buildPipenvProject` is a package for `callPackage`. It takes the packages

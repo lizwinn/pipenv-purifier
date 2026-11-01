@@ -1,8 +1,11 @@
 # pipenv-purifier
 
-pipenv-purifier lets Nix build a [Pipenv](https://pipenv.pypa.io/) project in
-its sandbox, offline, from the project's lockfiles. Nix reads the lockfiles
-directly, so the project holds only its own sources and lockfiles.
+pipenv-purifier keeps Pipenv's development workflow on locked,
+Nix-resolved dependencies. Use the normal build and test commands in your
+working tree; building the project itself in the Nix sandbox is an
+optional next step.
+
+It follows the [purifier contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md).
 
 Pipfile.lock pins every package with the hashes of all of its files.
 `pipenv-purifier lock` adds what a sandboxed build also needs, in
@@ -16,10 +19,28 @@ pipenv-purifier is part of the [nix-purifiers](https://nix-purifiers.github.io)
 family and meets the family's
 [contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md).
 
+## Installation
+
+Install the integration into your Nix profile once:
+
+```sh
+nix profile install 'github:nix-purifiers/pipenv-purifier'
+```
+
+This installs the purifier CLI. The workflow below prepares the native
+tool's cache, hook or environment; follow that activation step before using
+your usual commands. The ordinary tool itself remains your normal
+installation unless the setup explicitly supplies a toolchain.
+
+`nix shell` makes an integration available temporarily instead of installing
+it. Keep using the activation steps below where a project environment or
+prefetched cache is required.
+
 ## Quickstart
 
-A project starts with three commands, which run in the directory that holds
-the Pipfile.
+Install Nix, then run the following from your existing project's root.
+The setup prepares the locked dependencies and the integration that
+Pipenv's normal commands use:
 
 ```zsh
 nix run github:nix-purifiers/pipenv-purifier -- lock
@@ -27,34 +48,60 @@ nix run github:nix-purifiers/pipenv-purifier -- prefetch
 pipenv run pytest
 ```
 
-`lock` writes `pipenv-purifier.lock.json`. It also writes Pipfile.lock when
-the project has none, and you commit both files. `prefetch` has Nix fetch
-everything the project needs on this machine, and it installs the
-project's `.venv` from those files, offline. After that, the usual Pipenv
-commands work.
+Commit the lockfiles that the lock command writes, including the build
+tool's own lockfile when it has one. Keep using the project's usual build,
+test and editor commands with this setup. Nix provides the locked
+dependencies; the development commands above run outside the Nix sandbox.
+No project Nix files are needed for this workflow.
 
-After `lock`, Nix builds the project from the same directory, with no Nix
-file added to the project. This command builds the sdist and wheel of the
-local package `app`:
+Sandboxed builds of the whole project are an optional
+[next step](#building-the-project-with-nix).
 
-```zsh
-nix build --impure --expr '
-  let
-    purifier = builtins.getFlake "github:nix-purifiers/pipenv-purifier";
-    pkgs = import purifier.inputs.nixpkgs {
-      system = builtins.currentSystem;
-      overlays = [ purifier.overlays.default ];
-    };
-  in
-  (pkgs.pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app'
-```
+## Development loop
 
-This uses the purifier's pinned nixpkgs, matching the lock command above.
-To build with ambient `<nixpkgs>` from your Nix search path instead,
-replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
-Both forms need no Nix files in your project. The build tool and language
-versions must match the lockfile; with ambient nixpkgs, lock with the
-purifier from that package set or pass a compatible toolchain to the builder.
+The development loop is Pipenv's own: `pipenv run`, `pipenv shell`, and the
+tests in the `.venv` that `prefetch` installed. Local packages stay editable
+when Pipfile.lock says so, so an edit to the source shows at once.
+
+To add a dependency, run `pipenv install <package>`, then `pipenv-purifier
+lock`, then `pipenv-purifier prefetch`. Run `pipenv-purifier lock` again
+whenever the Pipfile, Pipfile.lock or the `pyproject.toml` of a local
+package changes. The Nix build and `prefetch` refuse a lockfile that no
+longer matches them.
+
+To update dependencies, run `pipenv-purifier update`, which re-resolves
+every package with `pipenv lock`, or `pipenv-purifier update <package>...`,
+which re-resolves the named ones with `pipenv upgrade`. It then relocks
+`pipenv-purifier.lock.json` against the new Pipfile.lock.
+
+To publish, run `pipenv-purifier publish -- <arguments of uv publish>`.
+Nix builds the `release`, the sdists and wheels of the local packages, and
+`uv publish` uploads them, because Pipenv has no upload command of its own.
+`--release <path>` uploads a release that Nix built before.
+
+Pipenv has no plugin mechanism, so `pipenv-purifier` is a command of its own
+that runs Pipenv, rather than a plugin that Pipenv loads.
+
+`pipenv-purifier lock` keeps Pipfile.lock as Pipenv resolved it. When
+Pipfile.lock is missing or no longer matches the Pipfile, `lock` writes it
+with `pipenv lock` first. It looks up the URL of every hash of Pipfile.lock
+on the package's index, for every platform. It reads the build requirements
+of each package that may have to be built through the build backend's PEP
+517 hooks, and resolves each set with `pipenv lock` on a throwaway Pipfile,
+at the versions Pipfile.lock pins wherever the set allows them. It fetches
+each git dependency at its locked commit and records the version that its
+backend reads from git. It builds each local package once, to record the
+names of its sdist and wheel and the scripts it installs. `--lockfile
+<path>` writes the lockfile somewhere else, and every other command takes
+the same option.
+
+## Building the project with Nix
+
+Once the native development workflow is working, you can also build and
+test the whole project in the Nix sandbox. For this step, keep a flake or
+another Nix build definition in the project's repository, or maintain an
+external packaging repository that points at its sources and lockfiles.
+The builder consumes the same lockfiles as the development workflow.
 
 The expression applies this flake's `overlays.default`, which adds the
 scope `pipenv-purifier` to the package set. The scope holds the builder
@@ -145,43 +192,29 @@ building anything.
 two lockfiles into the lock in memory of the contract, `{ purifier,
 entries, outputs, problems }`, for a tool such as an SBOM generator.
 
-## Development loop
+### One-off builds without a project Nix file
 
-The development loop is Pipenv's own: `pipenv run`, `pipenv shell`, and the
-tests in the `.venv` that `prefetch` installed. Local packages stay editable
-when Pipfile.lock says so, so an edit to the source shows at once.
+For an ad hoc build, the builder can also be evaluated directly from the
+project root. Replace the example package name with one from your project:
 
-To add a dependency, run `pipenv install <package>`, then `pipenv-purifier
-lock`, then `pipenv-purifier prefetch`. Run `pipenv-purifier lock` again
-whenever the Pipfile, Pipfile.lock or the `pyproject.toml` of a local
-package changes. The Nix build and `prefetch` refuse a lockfile that no
-longer matches them.
+```zsh
+nix build --impure --expr '
+  let
+    purifier = builtins.getFlake "github:nix-purifiers/pipenv-purifier";
+    pkgs = import purifier.inputs.nixpkgs {
+      system = builtins.currentSystem;
+      overlays = [ purifier.overlays.default ];
+    };
+  in
+  (pkgs.pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app'
+```
 
-To update dependencies, run `pipenv-purifier update`, which re-resolves
-every package with `pipenv lock`, or `pipenv-purifier update <package>...`,
-which re-resolves the named ones with `pipenv upgrade`. It then relocks
-`pipenv-purifier.lock.json` against the new Pipfile.lock.
-
-To publish, run `pipenv-purifier publish -- <arguments of uv publish>`.
-Nix builds the `release`, the sdists and wheels of the local packages, and
-`uv publish` uploads them, because Pipenv has no upload command of its own.
-`--release <path>` uploads a release that Nix built before.
-
-Pipenv has no plugin mechanism, so `pipenv-purifier` is a command of its own
-that runs Pipenv, rather than a plugin that Pipenv loads.
-
-`pipenv-purifier lock` keeps Pipfile.lock as Pipenv resolved it. When
-Pipfile.lock is missing or no longer matches the Pipfile, `lock` writes it
-with `pipenv lock` first. It looks up the URL of every hash of Pipfile.lock
-on the package's index, for every platform. It reads the build requirements
-of each package that may have to be built through the build backend's PEP
-517 hooks, and resolves each set with `pipenv lock` on a throwaway Pipfile,
-at the versions Pipfile.lock pins wherever the set allows them. It fetches
-each git dependency at its locked commit and records the version that its
-backend reads from git. It builds each local package once, to record the
-names of its sdist and wheel and the scripts it installs. `--lockfile
-<path>` writes the lockfile somewhere else, and every other command takes
-the same option.
+This uses the purifier's pinned nixpkgs, matching the lock command above.
+To build with ambient `<nixpkgs>` from your Nix search path instead,
+replace `import purifier.inputs.nixpkgs` with `import <nixpkgs>`.
+Both forms need no Nix files in your project. The build tool and language
+versions must match the lockfile; with ambient nixpkgs, lock with the
+purifier from that package set or pass a compatible toolchain to the builder.
 
 ## Working offline
 
@@ -253,6 +286,11 @@ with neither a wheel for the build's system nor an sdist, fails the build
 with pip's error about the missing file.
 
 ## Examples
+
+For day-to-day work on these projects, use the native-tool setup and
+commands in [Quickstart](#quickstart) and [Development loop](#development-loop).
+The Nix expressions below show optional sandboxed packaging of those
+projects.
 
 [Pipenv](https://github.com/pypa/pipenv) develops itself with a Pipfile, so
 its repository is a Pipenv project like any other. A developer of Pipenv

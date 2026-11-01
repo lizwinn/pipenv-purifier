@@ -76,6 +76,47 @@ let
       }).purifier;
   currentLock = builtins.tryEval current.purifier.version;
 
+  # Damaged copies of the simple fixture's pipenv-purifier.lock.json, each of
+  # which the library must refuse.
+  simpleLock = builtins.fromJSON (builtins.readFile ./fixtures/simple/pipenv-purifier.lock.json);
+  withLock =
+    name: lock:
+    builtins.tryEval
+      (import ../nix/lib/lock.nix {
+        src = ./fixtures/simple;
+        lockFile = builtins.toFile "${name}.json" (builtins.toJSON lock);
+      }).purifier;
+  damaged = {
+    # The attrs wheel with the hash of the docopt sdist.
+    tamperedHash = simpleLock // {
+      artifacts = map (
+        a:
+        if a.path == "attrs-25.3.0-py3-none-any.whl" then
+          a // { hash = "sha256-SbOoJSgL1ms6qDWF71nEqMgvLIpSLb51SovI0IyFxJE="; }
+        else
+          a
+      ) simpleLock.artifacts;
+    };
+    # No files of a package that Pipfile.lock pins.
+    missingPackage = simpleLock // {
+      packages = removeAttrs simpleLock.packages [ "attrs==25.3.0" ];
+    };
+    # A file the packages name, without its download entry.
+    missingArtifact = simpleLock // {
+      artifacts = lib.filter (a: a.path != "docopt-0.6.2.tar.gz") simpleLock.artifacts;
+    };
+    # A JSON file that is no lockfile of this format.
+    notALockfile = {
+      hello = "world";
+    };
+    otherVersion = simpleLock // {
+      version = 99;
+    };
+  };
+  acceptedDamage = lib.filter (name: (withLock name damaged.${name}).success) (lib.attrNames damaged);
+  # The undamaged copy is accepted, so the refusals above are of the damage.
+  undamaged = withLock "undamaged" simpleLock;
+
   failures =
     lib.filter (name: wheelCases.${name} != wheelExpected.${name}) (lib.attrNames wheelCases)
     ++ lib.concatMap (
@@ -85,7 +126,9 @@ let
       path: lib.optional (current.normalizePath path != pathCases.${path}) "normalizePath ${path}"
     ) (lib.attrNames pathCases)
     ++ lib.optional staleLock.success "a stale pipenv-purifier.lock.json was accepted"
-    ++ lib.optional (!currentLock.success) "the current pipenv-purifier.lock.json was refused";
+    ++ lib.optional (!currentLock.success) "the current pipenv-purifier.lock.json was refused"
+    ++ map (name: "the damaged lockfile ${name} was accepted") acceptedDamage
+    ++ lib.optional (!undamaged.success) "an undamaged copy of the lockfile was refused";
 in
 pkgs.runCommand "pipenv-purifier-test-nix-library" { } (
   if failures == [ ] then

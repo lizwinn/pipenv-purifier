@@ -33,8 +33,25 @@ let
 
   supportedVersion = import ./lock-version.nix;
 
-  purifier = fromJSON (readFile lockFile);
-  pipfileLock = fromJSON (readFile pipfileLockFile);
+  purifier = builtins.addErrorContext "while reading ${toString lockFile}, which `pipenv-purifier lock` writes; run it again if the file is damaged" (
+    fromJSON (readFile lockFile)
+  );
+  pipfileLock = builtins.addErrorContext "while reading ${toString pipfileLockFile}, which `pipenv lock` writes; run it again if the file is damaged" (
+    fromJSON (readFile pipfileLockFile)
+  );
+
+  # The fields a lockfile of this format has.
+  purifierFields = [
+    "version"
+    "inputsHash"
+    "artifacts"
+    "packages"
+    "buildRequirements"
+    "builds"
+    "sources"
+    "outputs"
+  ];
+  missingFields = filter (field: !(builtins.isAttrs purifier && purifier ? ${field})) purifierFields;
 
   concatMap = f: list: concatLists (map f list);
   unique =
@@ -138,6 +155,45 @@ let
       )
     )
   );
+  # Every package of an index that Pipfile.lock pins, with the problems of
+  # its files in pipenv-purifier.lock.json: none recorded, or one whose hash
+  # Pipfile.lock does not list for it. Pipfile.lock is the lockfile Pipenv
+  # checked, so a file it does not list is one the lockfile was edited to
+  # name, and the build refuses it before fetching anything.
+  indexProblems = concatMap (
+    category:
+    concatMap (
+      p:
+      let
+        listed = map (
+          h:
+          builtins.convertHash {
+            hash = replaceStrings [ "sha256:" ] [ "" ] h;
+            hashAlgo = "sha256";
+            toHashFormat = "sri";
+          }
+        ) (p.entry.hashes or [ ]);
+        locked = purifier.packages.${p.key} or null;
+        names = if locked == null then [ ] else locked.wheels ++ filter (n: n != null) [ locked.sdist ];
+      in
+      if locked == null then
+        [ "it has no files of ${p.key}, which Pipfile.lock pins" ]
+      else
+        concatMap (
+          name:
+          let
+            file = files.${name} or null;
+          in
+          if file == null then
+            [ "it names ${name} for ${p.key} but has no download entry of it" ]
+          else if !builtins.elem file.hash listed then
+            [ "it gives ${name} of ${p.key} the hash ${file.hash}, which Pipfile.lock does not list" ]
+          else
+            [ ]
+        ) names
+    ) (filter (p: p.kind == "index") (packagesOf category))
+  ) categories;
+
   inputsHash = hashString "sha256" (
     "Pipfile.lock ${hashFile "sha256" pipfileLockFile}\n"
     + concatStringsSep "" (map (f: "${f} ${hashFile "sha256" (src + "/${f}")}\n") treeFiles)
@@ -157,11 +213,17 @@ let
     substring 0 200 (if undotted == "" then "file" else undotted);
 in
 assert
+  missingFields == [ ]
+  || throw "pipenv-purifier: ${toString lockFile} is not a pipenv-purifier lockfile: it has no ${concatStringsSep ", " missingFields}. Run `pipenv-purifier lock`.";
+assert
   purifier.version == supportedVersion
   || throw "pipenv-purifier: ${toString lockFile} has lock format version ${toString purifier.version}; this library reads version ${toString supportedVersion}. Run `pipenv-purifier lock` with the version that provides this library.";
 assert
   purifier.inputsHash == inputsHash
   || throw "pipenv-purifier: ${toString lockFile} does not match Pipfile.lock and the pyproject.toml files of the local packages. Run `pipenv-purifier lock`.";
+assert
+  indexProblems == [ ]
+  || throw "pipenv-purifier: ${toString lockFile} does not agree with Pipfile.lock: ${concatStringsSep "; " indexProblems}. Run `pipenv-purifier lock`.";
 {
   inherit
     purifier

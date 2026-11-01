@@ -167,6 +167,26 @@ in
       "sed -i 's/simple {versions}/edited {versions}/' src/simple/__init__.py"
       "edited attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";
 
+  # A package added to the Pipfile by hand, without `pipenv lock`: `sync`
+  # refuses before installing anything and names the commands to run.
+  sync-stale-pipfile =
+    runCommand "pipenv-purifier-test-sync-stale-pipfile" { nativeBuildInputs = [ cli ]; }
+      ''
+        cp -r ${./fixtures/simple} project
+        chmod -R u+w project
+        cd project
+        export HOME=$TMPDIR
+        sed -i 's/^attrs = "==25.3.0"$/attrs = "==25.3.0"\nidna = "*"/' Pipfile
+        if pipenv-purifier sync --inputs ${simple.interactive} 2> "$TMPDIR/error"; then
+          echo "sync accepted a Pipfile that Pipfile.lock does not match" >&2
+          exit 1
+        fi
+        cat "$TMPDIR/error"
+        grep -q 'run `pipenv lock`, then `pipenv-purifier lock`' "$TMPDIR/error"
+        test ! -e .venv/bin/simple
+        touch $out
+      '';
+
   # The lock run, against a local index that serves the files of the simple
   # fixture's lock: `pipenv lock`, then `pipenv-purifier lock`, which has to
   # find every file, resolve the same build requirements and record the same
@@ -194,22 +214,28 @@ in
         pipenv lock
         rm -rf .venv
         pipenv-purifier lock
+        cp pipenv-purifier.lock.json "$TMPDIR/first.json"
+        # A second lock run makes the same bytes.
+        pipenv-purifier lock
+        cmp "$TMPDIR/first.json" pipenv-purifier.lock.json
+        # The lockfile is the committed one byte for byte, once each URL is
+        # the committed URL of the same file: the local index serves the
+        # files under URLs of its own.
         ${pkgs.python3.interpreter} - ${./fixtures/simple/pipenv-purifier.lock.json} pipenv-purifier.lock.json <<'EOF'
         import json, sys
-        committed, made = (json.load(open(p)) for p in sys.argv[1:])
-        def shape(lock):
-            artifacts = {a["path"]: a["hash"] for a in lock["artifacts"]}
-            return {
-                "artifacts": artifacts,
-                "packages": lock["packages"],
-                "buildRequirements": lock["buildRequirements"],
-                "builds": lock["builds"],
-                "outputs": lock["outputs"],
-            }
-        if shape(committed) != shape(made):
-            for key in shape(committed):
-                if shape(committed)[key] != shape(made)[key]:
-                    print(f"{key} differs:\n{shape(committed)[key]}\n{shape(made)[key]}", file=sys.stderr)
+        committed_path, made_path = sys.argv[1:]
+        committed = json.load(open(committed_path))
+        made = json.load(open(made_path))
+        urls = {a["path"]: a["url"] for a in committed["artifacts"] if "url" in a}
+        for artifact in made["artifacts"]:
+            if artifact["path"] not in urls:
+                sys.exit(f"the lock run recorded {artifact['path']}, which the committed lockfile does not have")
+            artifact["url"] = urls[artifact["path"]]
+        made["inputsHash"] = committed["inputsHash"]
+        if json.dumps(made, indent=2) + "\n" != open(committed_path).read():
+            for key in committed:
+                if committed[key] != made.get(key):
+                    print(f"{key} differs:\n{committed[key]}\n{made.get(key)}", file=sys.stderr)
             sys.exit(1)
         EOF
         touch $out
@@ -228,6 +254,19 @@ in
   '';
 
   nix-library = import ./nix-library.nix { inherit pkgs; };
+
+  # The lock tool's unit tests, on the Python and packages the CLI runs on.
+  unit =
+    runCommand "pipenv-purifier-test-unit"
+      {
+        nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.packaging ])) ];
+      }
+      ''
+        cp ${../src/pipenv_purifier.py} pipenv_purifier.py
+        cp ${./test_pipenv_purifier.py} test_pipenv_purifier.py
+        python -m unittest -v test_pipenv_purifier
+        touch $out
+      '';
 
   cli = runCommand "pipenv-purifier-test-cli" { } ''
     ${lib.getExe cli} --help

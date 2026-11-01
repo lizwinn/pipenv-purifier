@@ -167,25 +167,34 @@ class Index:
                 final = response.geturl()
         except urllib.error.HTTPError as e:
             raise Error(f"the index {self.name} has no page for {project}: {e}") from e
-        found = {}
-        if "json" in content_type:
-            for entry in json.loads(body).get("files", []):
-                digest = entry.get("hashes", {}).get("sha256")
-                if digest:
-                    url = urllib.parse.urljoin(final, entry["url"])
-                    found[digest] = (entry["filename"], without_credentials(url))
-        else:
-            parser = AnchorParser()
-            parser.feed(body.decode())
-            for href in parser.links:
-                url = urllib.parse.urljoin(final, href)
-                parsed = urllib.parse.urlparse(url)
-                fragment = urllib.parse.parse_qs(parsed.fragment)
-                if "sha256" in fragment:
-                    plain = urllib.parse.urlunparse(parsed._replace(fragment=""))
-                    found[fragment["sha256"][0]] = (file_name(plain), without_credentials(plain))
+        found = parse_index_page(body, content_type, final)
         self.pages[project] = found
         return found
+
+
+def parse_index_page(body, content_type, page_url):
+    """The files of a project page of a simple index, as {sha256: (file
+    name, URL)}: a JSON page (PEP 691) by its `files`, an HTML page (PEP 503)
+    by the links with a sha256 fragment. Relative URLs resolve against the
+    page's URL, and no URL keeps the credentials of its host."""
+    found = {}
+    if "json" in content_type:
+        for entry in json.loads(body).get("files", []):
+            digest = entry.get("hashes", {}).get("sha256")
+            if digest:
+                url = urllib.parse.urljoin(page_url, entry["url"])
+                found[digest] = (entry["filename"], without_credentials(url))
+    else:
+        parser = AnchorParser()
+        parser.feed(body.decode())
+        for href in parser.links:
+            url = urllib.parse.urljoin(page_url, href)
+            parsed = urllib.parse.urlparse(url)
+            fragment = urllib.parse.parse_qs(parsed.fragment)
+            if "sha256" in fragment:
+                plain = urllib.parse.urlunparse(parsed._replace(fragment=""))
+                found[fragment["sha256"][0]] = (file_name(plain), without_credentials(plain))
+    return found
 
 
 # Build requirements
@@ -548,13 +557,25 @@ def inputs_hash(root, pipfile_lock):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def check_pipfile_lock(root):
-    """Pipfile.lock exists and matches the Pipfile."""
+def read_pipfile_lock(root):
+    """The project's Pipfile.lock, with an error that says what to run when
+    it is missing or damaged."""
     path = os.path.join(root, "Pipfile.lock")
     if not os.path.exists(path):
         raise Error(f"{root} has no Pipfile.lock; run `pipenv lock` first")
-    with open(path) as f:
-        pipfile_lock = json.load(f)
+    try:
+        with open(path) as f:
+            pipfile_lock = json.load(f)
+    except json.JSONDecodeError as e:
+        raise Error(f"{path} is not valid JSON ({e}); run `pipenv lock` to write it again") from e
+    if not isinstance(pipfile_lock, dict) or "_meta" not in pipfile_lock:
+        raise Error(f"{path} is not a Pipfile.lock; run `pipenv lock` to write it again")
+    return pipfile_lock
+
+
+def check_pipfile_lock(root):
+    """Pipfile.lock exists and matches the Pipfile."""
+    pipfile_lock = read_pipfile_lock(root)
     with open(os.path.join(root, "Pipfile"), "rb") as f:
         pipfile = tomllib.load(f)
     # Pipenv's own check: the hash in _meta is the hash of the Pipfile's
@@ -782,7 +803,7 @@ def nix_build(root, attribute, package=None):
         args += ["--argstr", "package", package]
     result = subprocess.run(args, text=True, stdout=subprocess.PIPE, check=False)
     if result.returncode != 0:
-        raise Error(f"the Nix build of {package or attribute} failed")
+        raise Error(f"the Nix build of {package or attribute} failed; its error above says what to run")
     return result.stdout.strip().splitlines()[-1]
 
 
@@ -808,13 +829,20 @@ def sync(root, inputs=None, categories_arg=None):
     git and URLs from their checkouts and files, and the local packages as
     Pipfile.lock says, editable or not. Pipenv finds the .venv afterwards,
     so `pipenv run` and `pipenv shell` work as usual."""
+    pipfile_lock = read_pipfile_lock(root)
+    if not os.path.exists(os.path.join(root, LOCK_FILE)):
+        raise Error(f"{root} has no {LOCK_FILE}; run `pipenv-purifier lock` first")
+    result = run(["pipenv", "verify"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=sys.executable))
+    if result.returncode != 0:
+        raise Error(
+            "Pipfile.lock does not match the Pipfile, as after adding a package to the Pipfile by hand; "
+            "run `pipenv lock`, then `pipenv-purifier lock`"
+        )
     if inputs is None:
         log("fetching the locked files with Nix")
         inputs = nix_build(root, "interactive")
     with open(os.path.join(inputs, "direct.json")) as f:
         direct = json.load(f)
-    with open(os.path.join(root, "Pipfile.lock")) as f:
-        pipfile_lock = json.load(f)
     venv = os.path.join(root, ".venv")
     python = os.path.join(venv, "bin", "python")
     if not os.path.exists(python):

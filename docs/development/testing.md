@@ -20,14 +20,25 @@ access other than the fixed-output fetches of locked files:
 - `sync-simple` and `sync-sources` run `pipenv-purifier sync` on copies of
   the fixtures, then edit the project and check that the editable install
   sees the edit.
+- `sync-stale-pipfile` adds a package to the Pipfile by hand and checks
+  that `sync` refuses before installing, naming `pipenv lock` and
+  `pipenv-purifier lock`.
 - `lock-run` runs `pipenv lock` and `pipenv-purifier lock` on a copy of the
   simple fixture against a local index that serves the fixture's locked
-  files, and compares the result with the committed lockfile, apart from the
-  URLs.
+  files. It checks that a second lock run writes the same bytes, and that
+  the lockfile is the committed one byte for byte once each URL is the
+  committed URL of the same file.
 - `publish` uploads the simple fixture's package to a local index with
   `pipenv-purifier publish --dist`.
-- `nix-library` tests wheel selection, name and path normalization, and the
-  refusal of a stale lockfile.
+- `nix-library` tests wheel selection and name and path normalization. It
+  also tests that the library refuses a stale lockfile, a tampered hash, a
+  package or download entry missing from the lockfile, a JSON file that is
+  no lockfile, and another format version.
+- `unit` runs `tests/test_pipenv_purifier.py`, the unit tests of the lock
+  tool: names, file names and URLs, JSON and HTML index pages, the
+  throwaway Pipfile of build requirements, the rewritten Pipfile.lock of
+  `sync`, the scripts of a wheel, the inputs hash, and a missing or damaged
+  Pipfile.lock.
 
 CI runs the checks on x86_64-linux and aarch64-linux.
 

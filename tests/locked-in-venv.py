@@ -19,11 +19,13 @@ with open(pipfile_lock_path) as f:
     pipfile_lock = json.load(f)
 prefix = os.path.realpath(sys.prefix)
 installed = {}
+versions = {}
 for distribution in importlib.metadata.distributions():
     location = os.path.realpath(str(distribution.locate_file("")))
     if location.startswith(prefix + os.sep):
         name = re.sub(r"[-_.]+", "-", distribution.metadata["Name"]).lower()
         installed[name] = distribution.version
+        versions.setdefault(name, set()).add(distribution.version)
 problems = []
 for category in selected:
     for name, entry in pipfile_lock[category].items():
@@ -31,6 +33,9 @@ for category in selected:
             continue
         normal = re.sub(r"[-_.]+", "-", name).lower()
         version = entry["version"].removeprefix("==")
+        if len(versions.get(normal, set())) > 1:
+            problems.append(f"{name} has multiple installed versions in {prefix}: {sorted(versions[normal])}")
+            continue
         found = installed.get(normal)
         if found is None:
             # A package whose markers leave it out on this system is not

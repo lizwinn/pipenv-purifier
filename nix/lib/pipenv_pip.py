@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 
+native_paths = sys.path.copy()
 if os.environ.get('PIPENV_PURIFIER_SITE_PATH'):
     sys.path[:0] = json.loads(os.environ['PIPENV_PURIFIER_SITE_PATH'])
 import pipenv
@@ -88,4 +89,7 @@ if capture:
     req_install.install_wheel = install
 
 if __name__ == '__main__':
+    # Bootstrap the vendored installer without letting its SDK metadata
+    # mask packages already installed in the target virtual environment.
+    sys.path[:] = native_paths
     sys.exit(main())

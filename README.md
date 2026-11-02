@@ -85,8 +85,7 @@ of each package that may have to be built through the build backend's PEP
 at the versions Pipfile.lock pins wherever the set allows them. It fetches
 each git dependency at its locked commit and records the version that its
 backend reads from git. It builds each local package once, to record the
-names of its sdist and wheel and the scripts it installs. `--lockfile
-<path>` writes the lockfile somewhere else, and every other command takes
+names of its sdist and wheel and the scripts it installs. `--lockfile <path>` writes the lockfile somewhere else, and every other command takes
 the same option.
 
 ## Building the project with Nix
@@ -110,14 +109,17 @@ directly:
   inputs.pipenv-purifier.url = "github:nix-purifiers/pipenv-purifier";
   inputs.nixpkgs.follows = "pipenv-purifier/nixpkgs";
 
-  outputs = { nixpkgs, pipenv-purifier, ... }:
+  outputs =
+    { nixpkgs, pipenv-purifier, ... }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ pipenv-purifier.overlays.default ];
       };
-      project = pkgs.pipenv-purifier.buildPipenvProject { src = ./.; };
+      project = pkgs.pipenv-purifier.buildPipenvProject {
+        src = ./.;
+      };
     in
     {
       # The sdist and wheel of the local package `app`.
@@ -192,15 +194,15 @@ For an ad hoc build, the builder can also be evaluated directly from the
 project root. Replace the example package name with one from your project:
 
 ```zsh
-nix build --impure --expr '
-  let
-    purifier = builtins.getFlake "github:nix-purifiers/pipenv-purifier";
-    pkgs = import purifier.inputs.nixpkgs {
-      system = builtins.currentSystem;
-      overlays = [ purifier.overlays.default ];
-    };
-  in
-  (pkgs.pipenv-purifier.buildPipenvProject { src = ./.; }).packages.app'
+nix build --impure --expr 'let
+  purifier = builtins.getFlake "github:nix-purifiers/pipenv-purifier";
+  pkgs = import purifier.inputs.nixpkgs {
+    system = builtins.currentSystem;
+    overlays = [ purifier.overlays.default ];
+  };
+in
+(pkgs.pipenv-purifier.buildPipenvProject { src = ./.; })
+.packages.app'
 ```
 
 This uses the purifier's pinned nixpkgs, matching the lock command above.
@@ -304,7 +306,8 @@ into the flake:
 
 ```zsh
 cd pipenv
-nix run github:nix-purifiers/pipenv-purifier -- lock --lockfile ../pipenv-packaging/pipenv-purifier.lock.json
+nix run github:nix-purifiers/pipenv-purifier -- lock \
+  --lockfile ../pipenv-packaging/pipenv-purifier.lock.json
 ```
 
 The flake in `pipenv-packaging/` takes the repository as an input and
@@ -319,7 +322,13 @@ builds it from that lockfile:
     flake = false;
   };
 
-  outputs = { nixpkgs, pipenv-purifier, pipenv-src, ... }:
+  outputs =
+    {
+      nixpkgs,
+      pipenv-purifier,
+      pipenv-src,
+      ...
+    }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
@@ -329,7 +338,10 @@ builds it from that lockfile:
       project = pkgs.pipenv-purifier.buildPipenvProject {
         src = pipenv-src;
         lockFile = ./pipenv-purifier.lock.json;
-        categories = [ "default" "develop" ];
+        categories = [
+          "default"
+          "develop"
+        ];
       };
     in
     {

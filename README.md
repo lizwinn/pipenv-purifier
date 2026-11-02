@@ -282,10 +282,11 @@ its repository is a Pipenv project like any other. A developer of Pipenv
 works on a clone of it as the Quickstart shows:
 
 ```zsh
+nix shell 'github:nix-purifiers/pipenv-purifier'
 git clone https://github.com/pypa/pipenv
 cd pipenv
-nix run github:nix-purifiers/pipenv-purifier -- lock
-nix run github:nix-purifiers/pipenv-purifier -- prefetch
+pipenv-purifier lock
+pipenv-purifier prefetch
 pipenv run pytest tests/unit
 ```
 
@@ -294,8 +295,9 @@ clone of the revision the flake builds, `--lockfile` writes the lockfile
 into the flake:
 
 ```zsh
+nix shell 'github:nix-purifiers/pipenv-purifier'
 cd pipenv
-nix run github:nix-purifiers/pipenv-purifier -- lock \
+pipenv-purifier lock \
   --lockfile ../pipenv-packaging/pipenv-purifier.lock.json
 ```
 

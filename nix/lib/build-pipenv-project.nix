@@ -41,6 +41,7 @@
   linkFarm,
   runCommand,
   writeText,
+  writeShellScriptBin,
   pipenv,
   glibc,
   fetchurl,
@@ -82,6 +83,7 @@
   # as "../shared", each mapped to a Nix path that holds it. A path inside
   # `src` is read from `src`.
   pathSources ? { },
+  projectDependencies ? null,
 }:
 let
   inherit (builtins)
@@ -135,6 +137,32 @@ let
     else
       pythonInterpreters.${pythonAttribute}
         or (throw "pipenv-purifier: the Pipfile asks for Python ${lock.pythonVersion}, and nixpkgs has no ${pythonAttribute}. Pass `python`.");
+
+  inputData = builtins.fromJSON (builtins.readFile lockFile);
+  providedNames = inputData.projectInputNames or [ ];
+  projectInputs = import ./python-inputs.nix {
+    inherit
+      lib
+      purifier
+      runCommand
+      writeText
+      projectDependencies
+      ;
+    python = interpreter;
+    system = stdenvNoCC.hostPlatform.system;
+    lock = inputData;
+  };
+  runtimePython = python3.withPackages (ps: [ (ps.toPythonModule pipenv) ]);
+  runtimePipenv = writeShellScriptBin "pipenv" ''
+    export PIPENV_PURIFIER_NIX_LIB=${./.}
+    export PIPENV_PURIFIER_INTERNAL=1
+    export PATH=${pipenv}/bin:$PATH
+    exec ${runtimePython.interpreter} -I ${./pipenv_runtime.py} "$@"
+  '';
+  substituteProvided = lib.optionalString (projectInputs.dependencies != [ ]) ''
+    ${interpreter.interpreter} ${./rebind_pipfile.py} \
+      ${projectInputs.bindings}/inputs.json "$TMPDIR/pipfile/Pipfile.lock"
+  '';
 
   platform = stdenvNoCC.hostPlatform;
   target = "Python ${interpreter.pythonVersion} on ${platform.system}";
@@ -369,7 +397,13 @@ let
         "editable"
       ];
     in
-    if kind == "git" then
+    if builtins.elem name providedNames then
+      (removeAttrs kept [ "version" ])
+      // {
+        path = "@provided:${name}@";
+        editable = false;
+      }
+    else if kind == "git" then
       kept
       // {
         path = "@wheel:${name}@";
@@ -427,7 +461,7 @@ let
       pname = "pipenv-environment";
       version = "0";
       inherit src;
-      nativeBuildInputs = [ pipenv ];
+      nativeBuildInputs = [ runtimePipenv ];
       env = pipEnv (wheelhouseFor selected);
       dontConfigure = true;
       buildPhase = ''
@@ -437,8 +471,13 @@ let
         cp Pipfile "$TMPDIR/pipfile/Pipfile"
         sed "s|@source@|$PWD|g" ${rewrittenLock} > "$TMPDIR/pipfile/Pipfile.lock"
         ${substituteGitWheels}
+        ${substituteProvided}
         ${copyOutsidePaths}
         ${interpreter.interpreter} -m venv "$out"
+        export PIPENV_PURIFIER_EXPORT_WHEELS="$out/nix-support/wheels"
+        ${lib.optionalString (
+          projectInputs.dependencies != [ ]
+        ) "export PIPENV_PURIFIER_BINDINGS=${projectInputs.bindings}/inputs.json"}
         VIRTUAL_ENV="$out" PIPENV_PIPFILE="$TMPDIR/pipfile/Pipfile" \
           pipenv sync --categories ${lib.escapeShellArg (lib.concatStringsSep " " selected)}
         runHook postBuild
@@ -527,6 +566,7 @@ let
       };
     in
     drv.overrideAttrs {
+      passthru.projections = projectionFor (environmentOf lock.categories) [ name ] name;
       passthru.artifacts = {
         inherit (drv) sdist wheel;
         ${output.sdist} = "${drv}/${output.sdist}";
@@ -534,6 +574,41 @@ let
       // lib.optionalAttrs output.pure { ${output.wheel} = "${drv}/${output.wheel}"; };
     }
   ) lock.outputs;
+
+  projectionFor =
+    selectedEnvironment: roots: label:
+    let
+      scope =
+        runCommand "${label}-publication-scope"
+          {
+            nativeBuildInputs = [ (interpreter.withPackages (ps: [ ps.packaging ])) ];
+            outputs = [
+              "out"
+              "runtime"
+            ];
+            repositories = builtins.toJSON (map toString (lib.attrValues packages));
+            roots = builtins.toJSON roots;
+            passAsFile = [
+              "repositories"
+              "roots"
+            ];
+          }
+          ''
+            python ${./wheel_scope.py} --environment ${selectedEnvironment} \
+              --repositories "$repositoriesPath" --roots "$rootsPath" \
+              --destination "$out" --runtime "$runtime"
+            mkdir -p "$runtime/nix-support"
+            printf '%s\n' ${selectedEnvironment} > "$runtime/nix-support/inputs"
+          '';
+    in
+    purifier.pythonProjections {
+      repository = scope.out;
+      runtimeRepository = scope.runtime;
+      dependencies = projectInputs.dependencies;
+      inherit runCommand;
+      python3 = interpreter;
+    };
+  projections = projectionFor environment null "pipenv";
 
   programs = listToAttrs (
     concatMap (
@@ -548,12 +623,19 @@ let
     ) (lib.attrValues lock.outputs)
   );
 
-  release = runCommand "pipenv-purifier-release" { } ''
-    mkdir $out
-    ${lib.concatMapStrings (package: ''
-      ln -s ${package}/* $out/
-    '') (lib.attrValues packages)}
-  '';
+  release =
+    runCommand "pipenv-purifier-release"
+      {
+        passthru.projections =
+          projectionFor (environmentOf lock.categories) (lib.attrNames packages)
+            "pipenv-release";
+      }
+      ''
+        mkdir $out
+        ${lib.concatMapStrings (package: ''
+          ln -s ${package}/* $out/
+        '') (lib.attrValues packages)}
+      '';
 
   # Every download of the lock, each with the systems it is needed on.
   fetches = read.entries;
@@ -564,6 +646,9 @@ let
   prefetch = runCommand "pipenv-purifier-prefetch" { } ''
     mkdir $out
     ln -s ${interpreter.interpreter} $out/python
+    ${lib.optionalString (
+      projectInputs.dependencies != [ ]
+    ) "ln -s ${projectInputs.bindings}/inputs.json $out/python-inputs.json"}
     ln -s ${wheelhouseFor lock.categories} $out/wheelhouse
     ln -s ${writeText "pipenv-purifier-direct.json" (builtins.toJSON directInputs)} $out/direct.json
   '';
@@ -571,6 +656,7 @@ in
 {
   inherit
     packages
+    projections
     tests
     release
     fetches

@@ -18,6 +18,7 @@ import html.parser
 import http.client
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import ssl
@@ -277,7 +278,7 @@ class Context:
         """The environment of the tools the lock run starts. Their caches
         go to the scratch directory."""
         return dict(
-            os.environ,
+            {key: value for key, value in os.environ.items() if key != "PIPENV_PURIFIER_BINDINGS"},
             PIP_CACHE_DIR=os.path.join(self.workdir, "pip-cache"),
             PIPENV_CACHE_DIR=os.path.join(self.workdir, "pipenv-cache"),
             PIPENV_VENV_IN_PROJECT="1",
@@ -693,7 +694,7 @@ def ensure_pipfile_lock(root, python, tool_lock):
     matches the Pipfile, as after adding a package to the Pipfile by hand,
     `pipenv lock` writes it."""
     with in_tree(root, tool_lock, write_back=True):
-        if not pipfile_matches(root, python):
+        if os.environ.get("PIPENV_PURIFIER_BINDINGS") or not pipfile_matches(root, python):
             log("Pipfile.lock is missing or does not match the Pipfile; writing it with `pipenv lock`")
             result = subprocess.run(["pipenv", "lock"], cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
             if result.returncode != 0:
@@ -714,7 +715,7 @@ def pipfile_lock_pins(pipfile_lock):
     return keys, {name: v.pop() for name, v in versions.items() if len(v) == 1}
 
 
-def lock(root, python, lock_path, tool_lock):
+def native_lock(root, python, lock_path, tool_lock):
     """Writes the lockfile, which records only what Pipfile.lock cannot:
     - `urls`: the URL of each file of an index, by the sha256 that
       Pipfile.lock, or `buildPackages`, lists for it. The file's name is the
@@ -818,8 +819,12 @@ def lock(root, python, lock_path, tool_lock):
 
     with tempfile.TemporaryDirectory(prefix="pipenv-purifier-") as workdir:
         ctx = Context(root, pipfile_lock, python, workdir)
+        configuration = os.environ.get("PIPENV_PURIFIER_BINDINGS")
+        provided = json.loads(Path(configuration).read_text())["modules"] if configuration else {}
         for category in categories(pipfile_lock):
             for name, entry in pipfile_lock[category].items():
+                if normalize(name) in provided:
+                    continue
                 kind = direct_kind(entry)
                 key = normalize(name)
                 if kind == "index":
@@ -929,7 +934,7 @@ def lock(root, python, lock_path, tool_lock):
     )
 
 
-def update(root, python, lock_path, tool_lock, names):
+def native_update(root, python, lock_path, tool_lock, names):
     """Updates both lockfiles: Pipenv re-resolves every package with `pipenv
     lock`, or the packages `names` with `pipenv upgrade`, which writes
     Pipfile.lock and installs nothing, and the lock run then writes the
@@ -940,7 +945,62 @@ def update(root, python, lock_path, tool_lock, names):
         result = subprocess.run(args, cwd=root, env=dict(os.environ, PIPENV_PYTHON=python), check=False)
         if result.returncode != 0:
             raise Error(f"`{' '.join(args)}` failed; its error above says why")
-    lock(root, python, lock_path, tool_lock)
+    native_lock(root, python, lock_path, tool_lock)
+
+
+@contextlib.contextmanager
+def input_context(lock_path, references=None, refresh=False):
+    try:
+        previous = json.loads(Path(lock_path).read_text()).get("projectInputs", [])
+    except (OSError, ValueError):
+        previous = []
+    if references is None:
+        references = [entry["reference"] for entry in previous]
+    if not references:
+        yield [], {}
+        return
+    sys.path.insert(0, os.path.join(os.environ["PIPENV_PURIFIER_LIBRARY"], "tools"))
+    sys.path.insert(0, os.environ["PIPENV_PURIFIER_NIX_LIB"])
+    import project_inputs
+    import python_bindings
+    records = project_inputs.pin(references, previous, refresh)
+    state = Path(lock_path).parent / ".pipenv-purifier"
+    state.mkdir(exist_ok=True)
+    (state / ".gitignore").write_text("*\n")
+    views = project_inputs.python_views(records, state / "project-inputs")
+    configuration = python_bindings.write(views, [entry["nativeRepository"] for entry in previous], state / "bindings")
+    old = os.environ.get("PIPENV_PURIFIER_BINDINGS")
+    os.environ["PIPENV_PURIFIER_BINDINGS"] = str(configuration)
+    try:
+        yield [entry | {"nativeRepository": str(view["repository"])}
+               for entry, view in zip(records, views, strict=True)], json.loads(configuration.read_text())["modules"]
+    finally:
+        if old is None:
+            os.environ.pop("PIPENV_PURIFIER_BINDINGS", None)
+        else:
+            os.environ["PIPENV_PURIFIER_BINDINGS"] = old
+
+
+def write_inputs(lock_path, records, modules):
+    if not records:
+        return
+    result = json.loads(Path(lock_path).read_text())
+    result["projectInputs"] = records
+    result["projectInputNames"] = sorted(modules)
+    result["contentHash"] = content_hash(result)
+    Path(lock_path).write_text(json.dumps(result, indent=2) + "\n")
+
+
+def lock(root, python, lock_path, tool_lock, inputs=None):
+    with input_context(lock_path, inputs) as (records, modules):
+        native_lock(root, python, lock_path, tool_lock)
+        write_inputs(lock_path, records, modules)
+
+
+def update(root, python, lock_path, tool_lock, names, inputs=None):
+    with input_context(lock_path, inputs, refresh=True) as (records, modules):
+        native_update(root, python, lock_path, tool_lock, names)
+        write_inputs(lock_path, records, modules)
 
 
 # Nix builds, prefetch and publish
@@ -985,6 +1045,9 @@ def offline_env(inputs):
     with Python packages sets one, is left out, because pip would take a
     package there as installed and leave the locked one out of .venv."""
     environment = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    configuration = os.path.join(inputs, "python-inputs.json")
+    if os.path.exists(configuration):
+        environment["PIPENV_PURIFIER_BINDINGS"] = configuration
     return dict(
         environment,
         PIP_NO_INDEX="1",
@@ -1046,8 +1109,15 @@ def prefetch(root, lock_path, tool_lock, inputs=None, categories_arg=None):
         source = os.path.join(os.path.dirname(lock_path), ROOT_DIR, "inputs")
         os.makedirs(os.path.dirname(source), exist_ok=True)
         inputs = nix_build(root, "prefetch", lock_path, tool_lock, out_link=source)
+    state_input = Path(lock_path).parent / ROOT_DIR / "inputs"
+    if not state_input.exists():
+        state_input.parent.mkdir(exist_ok=True)
+        (state_input.parent / ".gitignore").write_text("*\n")
+        state_input.symlink_to(Path(inputs).resolve())
     with open(os.path.join(inputs, "direct.json")) as f:
         direct = json.load(f)
+    configuration = Path(inputs) / "python-inputs.json"
+    provided = json.loads(configuration.read_text())["modules"] if configuration.exists() else {}
     venv = os.path.join(root, ".venv")
     python = os.path.join(venv, "bin", "python")
     if not os.path.exists(python):
@@ -1055,7 +1125,7 @@ def prefetch(root, lock_path, tool_lock, inputs=None, categories_arg=None):
         if result.returncode != 0:
             raise Error(f"creating {venv} failed")
     with tempfile.TemporaryDirectory(prefix="pipenv-purifier-") as workdir:
-        rewritten = rewrite(pipfile_lock, direct, lambda p: p if os.path.isabs(p) else os.path.normpath(os.path.join(root, p)), keep_editable=True)
+        rewritten = rewrite(pipfile_lock, direct, lambda p: p if os.path.isabs(p) else os.path.normpath(os.path.join(root, p)), keep_editable=True, provided=provided)
         shutil.copy(os.path.join(root, "Pipfile"), os.path.join(workdir, "Pipfile"))
         with open(os.path.join(workdir, "Pipfile.lock"), "w") as f:
             json.dump(rewritten, f, indent=4)
@@ -1078,7 +1148,7 @@ def prefetch(root, lock_path, tool_lock, inputs=None, categories_arg=None):
     )
 
 
-def rewrite(pipfile_lock, direct, local_path, keep_editable):
+def rewrite(pipfile_lock, direct, local_path, keep_editable, provided=None):
     """A copy of Pipfile.lock in which every package from git is a path to
     the wheel Nix built of it, every package from a URL a path to its locked
     file, and every local path absolute. `prefetch` keeps local packages
@@ -1086,6 +1156,12 @@ def rewrite(pipfile_lock, direct, local_path, keep_editable):
     out = json.loads(json.dumps(pipfile_lock))
     for category in categories(out):
         for name, entry in out[category].items():
+            module = (provided or {}).get(normalize(name))
+            if module:
+                for key in ("git", "ref", "file", "subdirectory", "hashes", "path", "editable", "version", "index"):
+                    entry.pop(key, None)
+                entry.update(path=module["wheel"], editable=False)
+                continue
             kind = direct_kind(entry)
             if kind in ("git", "file"):
                 target = direct.get(normalize(name))
@@ -1140,6 +1216,7 @@ def publish(root, lock_path, tool_lock, uv_publish_args, release=None):
         check_purifier_lock(root, read_pipfile_lock(tool_lock), lock_path, tool_lock)
         log("building the release with Nix")
         release = nix_build(root, "release", lock_path, tool_lock)
+    log(f"publishing files Nix built in {release}")
     files = distributions(release)
     if not files:
         raise Error("there is nothing to upload")
@@ -1190,6 +1267,8 @@ def main(argv=None):
         help="the `release` that buildPipenvProject built before, to upload instead of building it",
     )
     publish_parser.add_argument("uv_publish_args", nargs=argparse.REMAINDER, help="arguments for `uv publish`, after `--`")
+    for sub_parser in (lock_parser, update_parser):
+        sub_parser.add_argument("--input", action="append", help="a Nix producer exposing projections.python")
     for sub_parser in (lock_parser, update_parser, prefetch_parser, publish_parser):
         sub_parser.add_argument(
             "--lockfile",
@@ -1208,9 +1287,9 @@ def main(argv=None):
     tool_lock = os.path.abspath(args.tool_lockfile) if args.tool_lockfile else os.path.join(root, "Pipfile.lock")
     try:
         if args.command == "lock":
-            lock(root, args.python, lock_path, tool_lock)
+            lock(root, args.python, lock_path, tool_lock, args.input)
         elif args.command == "update":
-            update(root, args.python, lock_path, tool_lock, args.packages)
+            update(root, args.python, lock_path, tool_lock, args.packages, args.input)
         elif args.command == "prefetch":
             prefetch(root, lock_path, tool_lock, args.inputs, args.categories)
         elif args.command == "publish":

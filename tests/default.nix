@@ -256,6 +256,28 @@ let
   simpleAgain = simple.packages.simple.overrideAttrs { pname = "simple-again"; };
 in
 {
+  composition-producer = simple.packages.simple;
+  python-projection =
+    runCommand "pipenv-native-projection-downstream"
+      {
+        nativeBuildInputs = [
+          pkgs.uv
+          pkgs.python3
+        ];
+      }
+      ''
+        export HOME=$TMPDIR UV_CACHE_DIR=$TMPDIR/uv-cache UV_PYTHON_DOWNLOADS=never
+        uv venv --python ${pkgs.python3.interpreter} downstream
+        uv pip install --python downstream/bin/python --no-index \
+          --find-links ${simple.packages.simple.projections.python} simple
+        downstream/bin/simple > result
+        grep -q 'attrs=25.3.0' result
+        downstream/bin/python - <<'PYTHON'
+        from importlib.metadata import version
+        assert '+nix.' in version('simple')
+        PYTHON
+        touch $out
+      '';
   simple =
     runs "simple" "${simple.environment}/bin/simple"
       "simple attrs=25.3.0 docopt=0.6.2 markupsafe=3.0.3";

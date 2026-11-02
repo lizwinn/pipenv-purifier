@@ -30,6 +30,8 @@ let
         !builtins.elem (baseNameOf p) [
           ".git"
           ".venv"
+          ".pipenv-purifier"
+          "build"
           "__pycache__"
           "dist"
         ];
@@ -72,6 +74,12 @@ if
     "release"
   ]
 then
-  project.${attribute}
+  if
+    attribute == "release"
+    && (builtins.fromJSON (builtins.readFile (/. + lockFile))).projectInputs or [ ] != [ ]
+  then
+    project.release.projections.python
+  else
+    project.${attribute}
 else
   throw "pipenv-purifier: cli.nix builds `prefetch` or `release`, not ${attribute}"

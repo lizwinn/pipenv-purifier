@@ -77,6 +77,35 @@ backend reads from git. It builds each local package once, to record the
 names of its sdist and wheel and the scripts it installs. `--lockfile <path>` writes the lockfile somewhere else, and every other command takes
 the same option.
 
+## Dependencies from another purified project
+
+```zsh
+nix shell 'github:nix-purifiers/pipenv-purifier'
+pipenv-purifier lock \
+  --input 'github:owner/library/<rev>#library'
+pipenv-purifier prefetch
+pipenv sync
+pipenv run test
+```
+
+The producer exposes `projections.python`, the wheelhouse format shared with
+uv, PDM, pip and Poetry. Repeat `--input` for more producers. Project
+requirements stay unchanged; the purifier lock records the Nix source pins
+and omits supplied downloads. Relocking retains those pins; `update`
+refreshes them.
+
+Use the `pipenv` wrapper supplied by this shell for sync, install and run.
+It validates the lock and rebinds input paths in a temporary native lockfile.
+Committed files stay unchanged. Without a lockfile, it warns and uses
+ordinary, impure Pipenv resolution. Lock and update dependencies with
+`pipenv-purifier lock` and `pipenv-purifier update`.
+
+The builder exposes `projections.python` on each local package and on the
+project. Exported wheels include their native runtime closure, with
+Nix-derived versions and dependency metadata for ordinary installers.
+Composed publishing uploads those wheels. Use an index accepting local
+versions, or consume the repository with `--find-links`.
+
 ## Building the project with Nix
 
 Once the native development workflow is working, you can also build and

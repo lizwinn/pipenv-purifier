@@ -159,18 +159,24 @@ let
   # kind and its entry of Pipfile.lock.
   packagesOf =
     category:
-    map (
-      name:
-      let
-        entry = pipfileLockData.${category}.${name};
-        kind = kindOf entry;
-      in
-      {
-        name = normalize name;
-        inherit kind entry;
-        key = if kind == "index" then "${normalize name}==${version entry}" else normalize name;
-      }
-    ) (attrNames pipfileLockData.${category});
+    map
+      (
+        name:
+        let
+          entry = pipfileLockData.${category}.${name};
+          kind = kindOf entry;
+        in
+        {
+          name = normalize name;
+          inherit kind entry;
+          key = if kind == "index" then "${normalize name}==${version entry}" else normalize name;
+        }
+      )
+      (
+        filter (name: !(builtins.elem (normalize name) (purifier.projectInputNames or [ ]))) (
+          attrNames pipfileLockData.${category}
+        )
+      );
   allPackages = concatMap packagesOf categories;
 
   hexOf = hash: replaceStrings [ "sha256:" ] [ "" ] hash;

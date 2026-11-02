@@ -24,6 +24,7 @@ let
   python = python3.withPackages (ps: [
     ps.packaging
     ps.build
+    (ps.toPythonModule pipenv)
   ]);
 in
 stdenvNoCC.mkDerivation {
@@ -43,8 +44,14 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin $out/share/pipenv-purifier
-    cp src/pipenv_purifier.py $out/share/pipenv-purifier/
+    cp src/*.py $out/share/pipenv-purifier/
     cp -r nix/lib $out/share/pipenv-purifier/nix-lib
+    makeWrapper ${python.interpreter} $out/bin/pipenv \
+      --add-flags "-I $out/share/pipenv-purifier/nix-lib/pipenv_runtime.py" \
+      --set PIPENV_PURIFIER_NIX_LIB $out/share/pipenv-purifier/nix-lib \
+      --set PIPENV_PURIFIER_NIXPKGS ${path} \
+      --set PIPENV_PURIFIER_LIBRARY ${purifierSource} \
+      --prefix PATH : ${lib.makeBinPath [ pipenv ]}
     makeWrapper ${python.interpreter} $out/bin/pipenv-purifier \
       --add-flags "-I $out/share/pipenv-purifier/pipenv_purifier.py" \
       --prefix PATH : ${
@@ -55,6 +62,8 @@ stdenvNoCC.mkDerivation {
           nix-prefetch-git
         ]
       } \
+      --prefix PATH : "$out/bin" \
+      --set PIPENV_PURIFIER_INTERNAL 1 \
       --set-default PIPENV_PURIFIER_PYTHON ${python3.interpreter} \
       --set PIPENV_PURIFIER_NIX_LIB $out/share/pipenv-purifier/nix-lib \
       --set PIPENV_PURIFIER_NIXPKGS ${path} \

@@ -5,8 +5,6 @@ Nix-resolved dependencies. Use the normal build and test commands in your
 working tree; building the project itself in the Nix sandbox is an
 optional next step.
 
-It follows the [purifier contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md).
-
 Pipfile.lock pins every package with the hashes of all of its files.
 `pipenv-purifier lock` adds what a sandboxed build also needs, in
 `pipenv-purifier.lock.json` beside Pipfile.lock: the URLs of those files,
@@ -14,10 +12,6 @@ the build requirements of the packages that have to be built (local
 packages, git checkouts and sdists), the content hash of each git checkout,
 and the names of what the local packages produce. Pipenv itself installs
 the project, in the Nix sandbox and on your machine, from the locked files.
-
-pipenv-purifier is part of the [nix-purifiers](https://nix-purifiers.github.io)
-family and meets the family's
-[contract](https://github.com/nix-purifiers/purifier/blob/main/CONTRACT.md).
 
 ## Installation
 

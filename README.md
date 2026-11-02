@@ -356,7 +356,5 @@ When the flake moves `pipenv-src` to another revision, run the same `lock
 
 ## Credits
 
-The design follows [sbt-purifier](https://github.com/nix-purifiers/sbt-purifier).
 The purifier idea was inspired by nixcloud's
 [cargo (libnix)](https://github.com/nixcloud/cargo).
-`docs/development/` describes the design and the tests.

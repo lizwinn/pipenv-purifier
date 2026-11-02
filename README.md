@@ -95,7 +95,8 @@ directly:
 
 ```nix
 {
-  inputs.pipenv-purifier.url = "github:nix-purifiers/pipenv-purifier";
+  inputs.pipenv-purifier.url =
+    "github:nix-purifiers/pipenv-purifier";
   inputs.nixpkgs.follows = "pipenv-purifier/nixpkgs";
 
   outputs =
@@ -106,15 +107,18 @@ directly:
         inherit system;
         overlays = [ pipenv-purifier.overlays.default ];
       };
-      project = pkgs.pipenv-purifier.buildPipenvProject {
+      project =
+        pkgs.pipenv-purifier.buildPipenvProject {
         src = ./.;
       };
     in
     {
       # The sdist and wheel of the local package `app`.
       packages.${system}.app = project.packages.app;
-      # A virtual environment with the packages of the `default` category.
-      packages.${system}.environment = project.environment;
+      # A virtual environment with the packages of the
+      # `default` category.
+      packages.${system}.environment =
+        project.environment;
       # The Pipfile's script `test`, run in the sandbox.
       checks.${system}.tests = project.tests;
       # The script `app`, for `nix run`.
@@ -306,7 +310,8 @@ builds it from that lockfile:
 
 ```nix
 {
-  inputs.pipenv-purifier.url = "github:nix-purifiers/pipenv-purifier";
+  inputs.pipenv-purifier.url =
+    "github:nix-purifiers/pipenv-purifier";
   inputs.nixpkgs.follows = "pipenv-purifier/nixpkgs";
   inputs.pipenv-src = {
     url = "github:pypa/pipenv";
@@ -326,7 +331,8 @@ builds it from that lockfile:
         inherit system;
         overlays = [ pipenv-purifier.overlays.default ];
       };
-      project = pkgs.pipenv-purifier.buildPipenvProject {
+      project =
+        pkgs.pipenv-purifier.buildPipenvProject {
         src = pipenv-src;
         lockFile = ./pipenv-purifier.lock.json;
         categories = [
@@ -336,9 +342,11 @@ builds it from that lockfile:
       };
     in
     {
-      # A virtual environment with the dependencies of Pipenv and its
+      # A virtual environment with the dependencies of
+      # Pipenv and its
       # development tools.
-      packages.${system}.environment = project.environment;
+      packages.${system}.environment =
+        project.environment;
     };
 }
 ```

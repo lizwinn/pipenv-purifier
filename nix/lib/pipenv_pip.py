@@ -10,7 +10,7 @@ import tempfile
 
 native_paths = sys.path.copy()
 if os.environ.get('PIPENV_PURIFIER_SITE_PATH'):
-    sys.path[:0] = json.loads(os.environ['PIPENV_PURIFIER_SITE_PATH'])
+    sys.path[:0] = [path for path in json.loads(os.environ['PIPENV_PURIFIER_SITE_PATH']) if path and any(part in ('site-packages','dist-packages') for part in Path(path).parts)]
 import pipenv
 import pipenv.patched.pip as pip
 from pipenv.patched.pip._internal.cli import main_parser
@@ -18,7 +18,7 @@ from pipenv.patched.pip._internal.cli.main import main
 
 # Keep the adapter when native pip delegates --python to a virtualenv.
 # Build-isolation subprocesses retain pip's original entry point instead.
-os.environ.setdefault('PIPENV_PURIFIER_SITE_PATH', json.dumps(sys.path))
+os.environ['PIPENV_PURIFIER_SITE_PATH'] = json.dumps([path for path in sys.path if path and any(part in ('site-packages','dist-packages') for part in Path(path).parts)])
 main_parser.get_runnable_pip = lambda: str(Path(__file__).resolve())
 
 bindings = os.environ.get('PIPENV_PURIFIER_BINDINGS')

@@ -64,7 +64,7 @@ def native_inputs():
 
 def main():
     with native_inputs():
-        os.environ.setdefault('PIPENV_PURIFIER_SITE_PATH', json.dumps(sys.path))
+        os.environ['PIPENV_PURIFIER_SITE_PATH'] = json.dumps([path for path in sys.path if path and any(part in ('site-packages','dist-packages') for part in Path(path).parts)])
         if os.environ.get('PIPENV_PURIFIER_BINDINGS'):
             os.environ['PIPENV_RESOLVER_PARENT_PYTHON'] = '1'
         sys.path.insert(0, os.environ['PIPENV_PURIFIER_NIX_LIB'])

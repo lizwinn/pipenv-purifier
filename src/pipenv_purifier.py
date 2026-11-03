@@ -949,7 +949,7 @@ def native_update(root, python, lock_path, tool_lock, names):
 
 
 @contextlib.contextmanager
-def input_context(lock_path, references=None, refresh=False):
+def input_context(lock_path, references=None, refresh=False, python=None):
     try:
         previous = json.loads(Path(lock_path).read_text()).get("projectInputs", [])
     except (OSError, ValueError):
@@ -968,7 +968,7 @@ def input_context(lock_path, references=None, refresh=False):
     state.mkdir(exist_ok=True)
     (state / ".gitignore").write_text("*\n")
     views = project_inputs.python_views(records, state / "project-inputs")
-    configuration = python_bindings.write(views, [entry["nativeRepository"] for entry in previous], state / "bindings")
+    configuration = python_bindings.write(views, [entry["nativeRepository"] for entry in previous], state / "bindings", python=python)
     old = os.environ.get("PIPENV_PURIFIER_BINDINGS")
     os.environ["PIPENV_PURIFIER_BINDINGS"] = str(configuration)
     try:
@@ -992,13 +992,13 @@ def write_inputs(lock_path, records, modules):
 
 
 def lock(root, python, lock_path, tool_lock, inputs=None):
-    with input_context(lock_path, inputs) as (records, modules):
+    with input_context(lock_path, inputs, python=python) as (records, modules):
         native_lock(root, python, lock_path, tool_lock)
         write_inputs(lock_path, records, modules)
 
 
 def update(root, python, lock_path, tool_lock, names, inputs=None):
-    with input_context(lock_path, inputs, refresh=True) as (records, modules):
+    with input_context(lock_path, inputs, refresh=True, python=python) as (records, modules):
         native_update(root, python, lock_path, tool_lock, names)
         write_inputs(lock_path, records, modules)
 
